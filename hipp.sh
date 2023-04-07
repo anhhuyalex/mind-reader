@@ -1,0 +1,28 @@
+#!/bin/bash
+#SBATCH --job-name=hipp_test
+#SBATCH --cpus-per-task=1
+#SBATCH --mem-per-cpu=5G
+#SBATCH --time=24:00:00
+#SBATCH --partition=della-vis3
+#SBATCH --gres=gpu:1
+#SBATCH --output _mindreader-%J.log
+
+
+# SBATCH --mail-type=ALL
+# SBATCH --mail-user=alexn@minerva.kgi.edu
+# source activate rtsynth
+source activate neu502b
+# export MODEL_SAVE_FOLDER='/home/an633/project/CuriousContrast/results_alex'
+# srun --pty -p della-gpu -c 2 -t 4:00:00 --gres=gpu:1 --mem-per-cpu=10G bash
+# sbatch hipp.sh 2 && sbatch hipp.sh 4 && sbatch hipp.sh 8 && sbatch hipp.sh 12 && sbatch hipp.sh 20 && sbatch hipp.sh 30 && sbatch hipp.sh 40 
+# for num_inputs in {2..30..2}; do sbatch hipp.sh $num_inputs; done
+# for num_inputs in {2..30..2}; do 
+#     for first_layer_l1_regularize in {0.0, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5}; do 
+#         sbatch hipp.sh $num_inputs $first_layer_l1_regularize; 
+#     done;
+# done
+
+# python -u exp.py --save_dir /scratch/gpfs/qanguyen/renorm --model_name attn --pixel_shuffled
+# python -u exp.py --save_dir /scratch/gpfs/qanguyen/renorm_freezeconv --freeze_epoch 0 --model_name vgg11
+# python -u exp.py --save_dir /gpfs/milgram/scratch60/turk-browne/an633/renorm_freezeconv --model_name cnn --freeze_conv
+python -u mind_reader.py --run_dir /scratch/gpfs/qanguyen/mind_reader

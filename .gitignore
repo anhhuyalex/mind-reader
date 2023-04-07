@@ -132,3 +132,10 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# tar files and logs
+*.tar
+*log.txt
+checkpoints
+*.out
+*.pt
