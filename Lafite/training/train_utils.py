@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
 
+import numpy as np
+
 def normalize():
     return T.Compose([
         T.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
@@ -51,7 +53,81 @@ def contra_loss(temp, mat1, mat2, lam):
     else:
         return torch.diagonal(sim)
     
+def pairwise_cosine_similarity(A, B, dim=1, eps=1e-8):
+    #https://stackoverflow.com/questions/67199317/pytorch-cosine-similarity-nxn-elements
+    numerator = A @ B.T
+    A_l2 = torch.mul(A, A).sum(axis=dim)
+    B_l2 = torch.mul(B, B).sum(axis=dim)
+    denominator = torch.max(torch.sqrt(torch.outer(A_l2, B_l2)), torch.tensor(eps))
+    return torch.div(numerator, denominator)
+
+def l2norm(x):
+    return nn.functional.normalize(x, dim=-1)
+
+def two_way_identification(all_brain_recons, all_images, model, preprocess, device):
+    per_correct = []
+    l2dist_list = []
+    for irecon, recon in enumerate(all_brain_recons):
+        with torch.no_grad():   
+            if torch.all(recon==0) or torch.all(recon==1):
+                print("skip")
+                continue
+            real = model(preprocess(all_images[irecon].to(device)).unsqueeze(0)).float().reshape(1, -1)
+            # fake = model(preprocess(transforms.functional.hflip(all_images[irecon]).unsqueeze(0))).float() 
+            fake = model(preprocess(recon).unsqueeze(0)).float().reshape(1, -1)
+            print("real", real.shape)
+            print("fake", fake.shape)
+            rand_idx = np.random.randint(len(all_brain_recons))
+            while irecon == rand_idx:
+                rand_idx = np.random.randint(len(all_brain_recons))
+            rand = model(preprocess(all_brain_recons[rand_idx]).unsqueeze(0)).float().reshape(1, -1)
+
+            # l2dist_fake = torch.mean(torch.sqrt((l2norm(real) - l2norm(fake))**2))
+            # l2dist_rand = torch.mean(torch.sqrt((l2norm(real) - l2norm(rand))**2))
+
+            # cosine similarity is faster and gives same results
+            l2dist_fake = pairwise_cosine_similarity(real,fake).item()
+            l2dist_rand = pairwise_cosine_similarity(real,rand).item()
+
+            if l2dist_fake > l2dist_rand:
+                per_correct.append(1)
+            else:
+                per_correct.append(0)
+            l2dist_list.append(l2dist_fake)
+    return per_correct, l2dist_list
+
+def two_way_identification_clip(all_brain_recons, all_images):
+    per_correct = []
+    l2dist_list = []
+    for irecon, recon in enumerate(all_brain_recons):
+        with torch.no_grad():       
+            if torch.all(recon==0) or torch.all(recon==1):
+                print("skip")
+                continue
+
+            real = clip_extractor.embed_image(all_images[irecon].unsqueeze(0)).float()
+            fake = clip_extractor.embed_image(recon.unsqueeze(0)).float()
+            rand_idx = np.random.randint(len(all_brain_recons))
+            while irecon == rand_idx:
+                rand_idx = np.random.randint(len(all_brain_recons))
+            rand = clip_extractor.embed_image(all_brain_recons[rand_idx].unsqueeze(0)).float()
+
+            # l2dist_fake = torch.mean(torch.sqrt((l2norm(real) - l2norm(fake))**2))
+            # l2dist_rand = torch.mean(torch.sqrt((l2norm(real) - l2norm(rand))**2))
+
+            # cosine similarity is faster and gives same results
+            l2dist_fake = utils.pairwise_cosine_similarity(real,fake).item()
+            l2dist_rand = utils.pairwise_cosine_similarity(real,rand).item()
+
+            if l2dist_fake > l2dist_rand:
+                per_correct.append(1)
+            else:
+                per_correct.append(0)
+            l2dist_list.append(l2dist_fake)
+    return per_correct, l2dist_list
+
 ## Save file
 def save_checkpoint(state, save_dir = "./", filename='checkpoint.pth.tar'):
     torch.save(state, f"{save_dir}/{filename}")
+    
     

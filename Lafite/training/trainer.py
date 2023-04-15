@@ -4,7 +4,7 @@ from torch import nn
 import torch.nn.functional as F
 from torchvision import transforms
 import torchvision
-from torchvision.models import resnet50, ResNet50_Weights
+from torchvision.models import resnet50, ResNet50_Weights, alexnet, AlexNet_Weights, inception_v3, Inception_V3_Weights
 
 from Lafite import dnnlib
 from Lafite import training
@@ -28,7 +28,9 @@ import h5py
 import io
 import pickle
 import copy
-    
+import os
+from collections import defaultdict    
+
 def load_file_pickle(fname):
     with open(fname, 'rb') as f:
         return pickle.load(f)
@@ -315,6 +317,14 @@ def initialize_record(train_params, data_params, model_optim_params, save_params
     record = dnnlib.EasyDict(
             curr_epoch = -1,
             metrics = dnnlib.EasyDict(
+                late_alexnet_correct = defaultdict(list),
+                late_alexnet_dist = defaultdict(list),
+                mid_alexnet_correct = defaultdict(list),
+                mid_alexnet_dist = defaultdict(list),
+                early_alexnet_correct = defaultdict(list),
+                early_alexnet_dist = defaultdict(list),
+                inception_correct = defaultdict(list),
+                inception_dist = defaultdict(list)
             ),    
             data = dnnlib.EasyDict(
                 inputs = None,
@@ -366,8 +376,7 @@ def load_training_set(rank, train_params, data_params, device):
     val_data = wds.DataPipeline([wds.SimpleShardList(data_params.val_url),
                         wds.tarfile_to_samples(),
                         wds.decode("torch"),
-                        wds.rename(images="jpg;png", voxels="nsdgeneral.npy", 
-                                    embs="sgxl_emb.npy", trial="trial.npy"),
+                        wds.rename(images="jpg;png", voxels="nsdgeneral.npy", trial="trial.npy"),
                         wds.to_tuple("voxels", 'images', 'trial'),
                         wds.batched(train_params.batch_size, partial=True),
                     ]).with_epoch(num_worker_batches)
@@ -375,10 +384,11 @@ def load_training_set(rank, train_params, data_params, device):
                            batch_size=None, shuffle=False, persistent_workers=True)
 
     # Load all text annotations and select the annotations for subject 1
-    f = h5py.File('/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_subj_indices.hdf5', 'r')
+    f = h5py.File(data_params.subjectorder_url, 'r')
     subj01_order = f['subj01'][:]
     f.close()
-    annots = np.load('/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_annots_curated.npy',allow_pickle=True)
+    # annots = np.load('/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_annots_curated.npy',allow_pickle=True)
+    annots = np.load(data_params.annotations_url, allow_pickle=True)
     subj01_annots = annots[subj01_order]
 
     if rank == 0:
@@ -400,6 +410,8 @@ def load_models(rank, train_params, model_optim_params, augment_pipeline, device
     # Construct networks.
     if rank == 0:
         print('Constructing networks...')
+        
+    
     # fMRI mappers are frozen at this stage
     fMRI_to_image_mapper = networks.BrainNetwork(model_optim_params.emb_shape).requires_grad_(False).to(device)
     ckpt_path = 'checkpoints/clip_image_vitB_conv_subj01_epoch35.pth'
@@ -433,19 +445,37 @@ def load_models(rank, train_params, model_optim_params, augment_pipeline, device
     resnet = resnet50(weights=ResNet50_Weights.DEFAULT)
     resnet_preprocess = ResNet50_Weights.DEFAULT.transforms()
 
+    # Make evaluation networks
+    alexnet_model = alexnet(weights=AlexNet_Weights.DEFAULT).to(device).eval()
+    alexnet_model.requires_grad_(False)
+    alexnet_preprocess = AlexNet_Weights.IMAGENET1K_V1.transforms()
+     
+    inception_v3_model = inception_v3(weights=Inception_V3_Weights.DEFAULT).to(device).eval()
+    inception_v3_model.requires_grad_(False)
+    inception_v3_preprocess = Inception_V3_Weights.IMAGENET1K_V1.transforms()
+    inception_v3_model.dropout = nn.Identity()
+    inception_v3_model.fc = nn.Identity()
 
-    
     # DDP
     if (train_params.num_gpus > 1):
-        for module in [fMRI_to_image_mapper, fMRI_to_text_mapper, clip_extractor, Generator, Discriminator, augment_pipeline]:
+        for module in [fMRI_to_image_mapper, fMRI_to_text_mapper, clip_extractor, Generator, Discriminator, augment_pipeline, resnet]:
             if (module is None) or len(list(module.parameters())) == 0:
                 continue
             module.requires_grad_(True)
             module = torch.nn.parallel.DistributedDataParallel(module, device_ids=[device], broadcast_buffers=False)
             module.requires_grad_(False)
    
-
-    return fMRI_to_image_mapper, fMRI_to_text_mapper, clip_extractor, Generator, Generator_ema, Discriminator, resnet, resnet_preprocess
+    Lafite_model = dnnlib.EasyDict(
+        fMRI_to_image_mapper=fMRI_to_image_mapper, fMRI_to_text_mapper=fMRI_to_text_mapper, 
+        clip_extractor=clip_extractor, Generator=Generator, Discriminator=Discriminator, augment_pipeline=augment_pipeline,
+        resnet = resnet, Generator_ema=Generator_ema
+    )
+    
+    evaluate_models = dnnlib.EasyDict(
+        alexnet_model=alexnet_model, alexnet_preprocess=alexnet_preprocess,
+        inception_v3_model=inception_v3_model, inception_v3_preprocess=inception_v3_preprocess
+    )
+    return Lafite_model, evaluate_models, resnet_preprocess
 
 def Print_network_summary_tables(rank, G, D, model_optim_params, device):
     if rank == 0:
@@ -460,26 +490,28 @@ def Print_network_summary_tables(rank, G, D, model_optim_params, device):
         
 
        
-def load_optimizer(Generator, Discriminator, model_optim_params):
-    # Generator main and 
+def load_optimizer(Lafite_model, model_optim_params):
+    # Generator optimizer
     mb_ratio = model_optim_params.opt_kwargs.G_reg_interval / (model_optim_params.opt_kwargs.G_reg_interval + 1)
     G_lrate = model_optim_params.opt_kwargs.G_lrate * mb_ratio
     betas = [beta ** mb_ratio for beta in model_optim_params.opt_kwargs.betas]
-    Generator_opt = torch.optim.Adam(Generator.parameters(), lr= G_lrate, betas=betas, eps=model_optim_params.opt_kwargs.eps)
+    Generator_opt = torch.optim.Adam(Lafite_model.Generator.parameters(), lr= G_lrate, betas=betas, eps=model_optim_params.opt_kwargs.eps)
     
     # Discriminator optimizer
     mb_ratio = model_optim_params.opt_kwargs.D_reg_interval / (model_optim_params.opt_kwargs.D_reg_interval + 1)
     D_lrate = model_optim_params.opt_kwargs.D_lrate * mb_ratio
     betas = [beta ** mb_ratio for beta in model_optim_params.opt_kwargs.betas]
-    Discriminator_opt = torch.optim.Adam(Discriminator.parameters(), lr= D_lrate, betas= betas, eps=model_optim_params.opt_kwargs.eps)
+    Discriminator_opt = torch.optim.Adam(Lafite_model.Discriminator.parameters(), lr= D_lrate, betas= betas, eps=model_optim_params.opt_kwargs.eps)
     
+    Lafite_optimizers = dnnlib.EasyDict(
+        Generator_opt=Generator_opt, Discriminator_opt=Discriminator_opt
+    )
+    return Lafite_optimizers
     
-    return Generator_opt, Discriminator_opt
-    
-def load_training_phases(Generator, Discriminator, Generator_opt, Discriminator_opt, model_optim_params):
+def load_training_phases(Lafite_model, Lafite_optimizers, model_optim_params):
     phases = []
-    phase_params = [("Generator", Generator, Generator_opt, model_optim_params.opt_kwargs.G_reg_interval), 
-     ("Discriminator", Discriminator, Discriminator_opt, model_optim_params.opt_kwargs.D_reg_interval)]
+    phase_params = [("Generator", Lafite_model.Generator, Lafite_optimizers.Generator_opt, model_optim_params.opt_kwargs.G_reg_interval), 
+     ("Discriminator", Lafite_model.Discriminator, Lafite_optimizers.Discriminator_opt, model_optim_params.opt_kwargs.D_reg_interval)]
     
     for name, module, opt, reg_interval in phase_params:
         phases += [dnnlib.EasyDict(name=name+'main', module=module, opt=opt, interval=1)]
@@ -532,26 +564,28 @@ def run_res(img, resnet):
     resnet_fts = max_vec / max_vec.max() + 2 * mean_vec / mean_vec.max()
     return resnet_fts.flatten(start_dim=1)
 
-def perform_phase(phase, clipaligned_img_emb, clipaligned_text_emb, augment_pipeline, clip_extractor, Generator, Discriminator, resnet, pl_mean, train_params, img_input, device):
+def perform_phase(phase, clipaligned_img_emb, clipaligned_text_emb, Lafite_model, pl_mean, train_params, img_input, device):
     phase.opt.zero_grad()
     phase.module.requires_grad_(True)
     clipaligned_img_emb_perturbed, clipaligned_text_emb_perturbed = get_perturbed_embeddings(clipaligned_img_emb, clipaligned_text_emb)
     fts = torch.cat((clipaligned_img_emb_perturbed, clipaligned_text_emb_perturbed),-1) # concat fmri mapped features
     #print("clipaligned_img_emb_perturbed", clipaligned_img_emb_perturbed.shape, "clipaligned_text_emb_perturbed", clipaligned_text_emb_perturbed.shape)
+    
     metrics = dnnlib.EasyDict()
+    outputs = dnnlib.EasyDict()
     if phase.name == "Generatormain":
         
-
+        print("clipaligned_img_emb_perturbed", clipaligned_img_emb_perturbed.shape)
         # Get styles
-        ws = get_styles(clipaligned_img_emb_perturbed, clipaligned_text_emb_perturbed, Generator, train_params, device)
-
+        ws = get_styles(clipaligned_img_emb_perturbed, clipaligned_text_emb_perturbed, Lafite_model.Generator, train_params, device)
+        print("Generatormain fts", fts.shape)
         # Generate image
         # The synthesizer automatically maps the fmri-mapped clip features to condition codes
         # as in page 3 of MindReader
-        gen_img = Generator.synthesis(ws, fts=fts, force_fp32=not torch.cuda.is_available())
-
+        gen_img = Lafite_model.Generator.synthesis(ws, fts=fts, force_fp32=not torch.cuda.is_available())
+        outputs['gen_img'] = gen_img.detach().clone()
         # Discriminator
-        real_or_fake_logits, discriminator_img_emb, discriminator_txt_emb = run_discriminator(gen_img, fts, augment_pipeline, Discriminator)
+        real_or_fake_logits, discriminator_img_emb, discriminator_txt_emb = run_discriminator(gen_img, fts, Lafite_model.augment_pipeline, Lafite_model.Discriminator)
 
         # GAN-Losses
         loss_GAN_Generator = F.softplus(-real_or_fake_logits)
@@ -559,7 +593,7 @@ def perform_phase(phase, clipaligned_img_emb, clipaligned_text_emb, augment_pipe
         # Process generated image
         # print(f'gen img shape: {gen_img.shape}, range: {gen_img.min(), gen_img.max()}')
         normed_gen_full_img = train_utils.full_preprocess(gen_img)
-        normed_gen_full_img_clip = clip_extractor.embed_image(normed_gen_full_img) #h_img^gen
+        normed_gen_full_img_clip = Lafite_model.clip_extractor.embed_image(normed_gen_full_img) #h_img^gen
         normed_gen_full_img_clip = F.normalize(normed_gen_full_img_clip,dim=-1) 
 
         # Lc2
@@ -584,6 +618,7 @@ def perform_phase(phase, clipaligned_img_emb, clipaligned_text_emb, augment_pipe
         metrics.loss_GAN_Generator = loss_GAN_Generator.detach()
         metrics.Lc1 = Lc1.detach()
         metrics.Lc2 = Lc2.detach()
+        outputs.gen_img = gen_img
         
     elif phase.name == "Generatorreg": # path length regularization for generator
         batch_size = train_params.batch_size // train_params.pl_batch_shrink
@@ -591,12 +626,12 @@ def perform_phase(phase, clipaligned_img_emb, clipaligned_text_emb, augment_pipe
         fts.requires_grad_()
         
         # Get styles
-        gen_ws = get_styles(clipaligned_img_emb_perturbed[:batch_size], clipaligned_text_emb_perturbed[:batch_size], Generator, train_params, device)
+        gen_ws = get_styles(clipaligned_img_emb_perturbed[:batch_size], clipaligned_text_emb_perturbed[:batch_size], Lafite_model.Generator, train_params, device)
 
         # Generate image
         # The synthesizer automatically maps the fmri-mapped clip features to condition codes
         # as in page 3 of MindReader
-        gen_img = Generator.synthesis(gen_ws, fts=fts, force_fp32=not torch.cuda.is_available())
+        gen_img = Lafite_model.Generator.synthesis(gen_ws, fts=fts, force_fp32=not torch.cuda.is_available())
         
         pl_noise = torch.randn_like(gen_img) / np.sqrt(gen_img.shape[2] * gen_img.shape[3])
         with torch.autograd.profiler.record_function('pl_grads'), torch_utils.ops.conv2d_gradfix.no_weight_gradients():
@@ -619,21 +654,21 @@ def perform_phase(phase, clipaligned_img_emb, clipaligned_text_emb, augment_pipe
     elif phase.name == "Discriminatormain": 
         # Dmain: Minimize logits for generated images.
         # Get styles
-        ws = get_styles(clipaligned_img_emb_perturbed, clipaligned_text_emb_perturbed, Generator, train_params, device)
+        ws = get_styles(clipaligned_img_emb_perturbed, clipaligned_text_emb_perturbed, Lafite_model.Generator, train_params, device)
 
         # Generate image
         # The synthesizer automatically maps the fmri-mapped clip features to condition codes
         # as in page 3 of MindReader
-        gen_img = Generator.synthesis(ws, fts=fts, force_fp32=not torch.cuda.is_available())
+        gen_img = Lafite_model.Generator.synthesis(ws, fts=fts, force_fp32=not torch.cuda.is_available())
 
         # Discriminator
-        real_or_fake_logits, discriminator_img_emb, discriminator_txt_emb = run_discriminator(gen_img, fts, augment_pipeline, Discriminator)
+        real_or_fake_logits, discriminator_img_emb, discriminator_txt_emb = run_discriminator(gen_img, fts, Lafite_model.augment_pipeline, Lafite_model.Discriminator)
         
         loss_Dgen = torch.nn.functional.softplus(real_or_fake_logits) # -log(1 - sigmoid(gen_logits))
         loss_Dgen.mean().mul(phase.interval).backward()
         
         # Dmain: Maximize logits for real images 
-        real_logits, discriminator_img_emb, discriminator_txt_emb = run_discriminator(img_input.to(device).detach(), fts, augment_pipeline, Discriminator)
+        real_logits, discriminator_img_emb, discriminator_txt_emb = run_discriminator(img_input.to(device).detach(), fts, Lafite_model.augment_pipeline, Lafite_model.Discriminator)
         loss_Dreal = torch.nn.functional.softplus(-real_logits) # -log(sigmoid(real_logits))
         Lc1_txt_txt = train_utils.contra_loss(train_params.contrastive_params.temp, discriminator_txt_emb, clipaligned_text_emb_perturbed, train_params.contrastive_params.lam)
         Lc1_img_img = train_utils.contra_loss(train_params.contrastive_params.temp, discriminator_img_emb, clipaligned_img_emb_perturbed, train_params.contrastive_params.lam)
@@ -650,7 +685,7 @@ def perform_phase(phase, clipaligned_img_emb, clipaligned_text_emb, augment_pipe
         # print("loss_Dreal", loss_Dreal)
     elif phase.name == "Discriminatorreg": # and apply R1 regularization.
         real_img_tmp = img_input.to(device).detach().requires_grad_()
-        real_logits, discriminator_img_emb, discriminator_txt_emb = run_discriminator(real_img_tmp, fts, augment_pipeline, Discriminator)
+        real_logits, discriminator_img_emb, discriminator_txt_emb = run_discriminator(real_img_tmp, fts, Lafite_model.augment_pipeline, Lafite_model.Discriminator)
         with torch.autograd.profiler.record_function('r1_grads'), torch_utils.ops.conv2d_gradfix.no_weight_gradients():
             r1_grads = torch.autograd.grad(outputs=[real_logits.sum()], inputs=[real_img_tmp], create_graph=True, only_inputs=True)[0]
         r1_penalty = r1_grads.square().sum([1,2,3])
@@ -664,10 +699,14 @@ def perform_phase(phase, clipaligned_img_emb, clipaligned_text_emb, augment_pipe
         # print("loss_Dr1", loss_Dr1, flush=True)
     phase.module.requires_grad_(False)
     
-    return pl_mean, metrics
+    return pl_mean, metrics, outputs
     
     
-def after_trainiter_callback(metrics, temp_metrics_tracker, phase, epoch, batch_idx, batch_size, tracker_init = [[],0]):
+def after_trainiter_callback(outputs, metrics, temp_metrics_tracker, phase, epoch, batch_idx, batch_size, save_params, tmp_dir, tracker_init = [[],0]):
+    # Save image outputs
+    if phase.name == "Generatormain":
+        torch.save(outputs, f"{tmp_dir}/Generatormain_batch{batch_idx}.pt")
+        
     for metric in metrics:
         try:
             temp_metrics_tracker[metric][0].append(metrics[metric].sum().detach()) 
@@ -676,6 +715,8 @@ def after_trainiter_callback(metrics, temp_metrics_tracker, phase, epoch, batch_
             temp_metrics_tracker[metric] = copy.deepcopy(tracker_init) # save sum and count for average
             
         
+    
+    
     
     # Update weights
     with torch.autograd.profiler.record_function(phase.name + '_opt'):
@@ -686,7 +727,7 @@ def after_trainiter_callback(metrics, temp_metrics_tracker, phase, epoch, batch_
             
     return temp_metrics_tracker
 
-def after_batch_callback(train_params, Generator, Generator_ema, Discriminator, epoch, batch_idx, cur_nimg, temp_metrics_tracker, record, n_iters = 100, tracker_init = [[],0]):
+def after_batch_callback(train_params, Lafite_model, epoch, batch_idx, cur_nimg, temp_metrics_tracker, record, n_iters = 100, tracker_init = [[],0]):
     if batch_idx % n_iters == n_iters - 1:
         # track moving average of metrics every n_iters iters
         for metric in temp_metrics_tracker:
@@ -704,9 +745,9 @@ def after_batch_callback(train_params, Generator, Generator_ema, Discriminator, 
         if train_params.ema_kwargs.ema_rampup is not None:
             ema_nimg = min(ema_nimg, cur_nimg * train_params.ema_kwargs.ema_rampup)
         ema_beta = 0.5 ** (train_params.batch_size / max(ema_nimg, 1e-8))
-        for p_ema, p in zip(Generator_ema.parameters(), Generator.parameters()):
+        for p_ema, p in zip(Lafite_model.Generator_ema.parameters(), Lafite_model.Generator.parameters()):
             p_ema.copy_(p.lerp(p_ema, ema_beta))
-        for b_ema, b in zip(Generator_ema.buffers(), Generator.buffers()):
+        for b_ema, b in zip(Lafite_model.Generator_ema.buffers(), Lafite_model.Generator.buffers()):
             b_ema.copy_(b)
 
     # Not done in Lafite code but I include it here for completeness
@@ -720,34 +761,75 @@ def after_batch_callback(train_params, Generator, Generator_ema, Discriminator, 
     
     return temp_metrics_tracker, record
 
-def after_epoch_callback(epoch, rank, record, record_model,
+
+
+def after_epoch_callback(epoch, rank, phases,  record, record_model,
                          train_params, save_params,
-                         train_dl, val_dl,
-                        augment_pipeline, Generator, Generator_ema, Discriminator, resnet, Generator_opt, Discriminator_opt
-                        ):
+                             train_dl, val_dl, subj01_annots,
+                        Lafite_model, evaluate_models, Lafite_optimizers, device
+                        )   :
     # compute fid metrics
-    result_dict = metric_main.calc_metric(metric='fid50k_full', G=Generator_ema, D=Discriminator,
-                dataset_kwargs=training_set_kwargs, testset_kwargs=testing_set_kwargs, num_gpus=num_gpus, rank=rank,
-                device=device, txt_recon=True, img_recon=False, metric_only_test=metric_only_test, use_fmri=use_fmri,
-                fmri_vec=fmri_vec_eval, fmri_vec2=fmri_vec2_eval, structure=structure)
+    #for metric in train_params.metrics:
+    all_brain_recons = []
+    all_true_images = []
+    for batch_idx, (voxel, img_input, cap_id) in enumerate(val_dl):
+            
+        voxel = voxel.to(device).float()
+        img_emb = Lafite_model.clip_extractor.embed_image(img_input).to(device).float()
+        #print("img_emb", img_emb.shape)
+        text_emb = Lafite_model.clip_extractor.embed_curated_annotations(subj01_annots[cap_id]).float()
+        batch_size = voxel.size(0)
+        #print("self.fMRI_to_image_mapper", self.fMRI_to_image_mapper)
+
+         # Map fmri to clip-aligned image and text features
+        clipaligned_img_emb = Lafite_model.fMRI_to_image_mapper(voxel)
+        clipaligned_text_emb = Lafite_model.fMRI_to_text_mapper(voxel)
+
+        # page 3 of MindReader: clamp and then normalize
+        clipaligned_img_emb = F.normalize(torch.clamp(clipaligned_img_emb, -1.5, 1.5), dim=1)
+        clipaligned_text_emb = F.normalize(torch.clamp(clipaligned_text_emb, -1.5, 1.5), dim=1)
+
+         
+             
+        pl_mean, metrics, outputs = perform_phase(phases[0], clipaligned_img_emb, clipaligned_text_emb, Lafite_model, torch.zeros([], device=device), train_params, img_input, device)
+        #print("outputs['gen_img']",outputs['gen_img'].shape)
+        [all_brain_recons.append(im) for im in outputs['gen_img']]
+        [all_true_images.append(im) for im in img_input]
+        
+        if batch_idx > 5: break
+            
+    print('late')
+    for i,f in enumerate(evaluate_models.alexnet_model.features):
+        if i > 7:
+            evaluate_models.alexnet_model.features[i] = nn.Identity()   # take late alexnet features
+    all_per_correct, all_l2dist_list = train_utils.two_way_identification(all_brain_recons, all_true_images, evaluate_models.alexnet_model.features, evaluate_models.alexnet_preprocess, device)
+    record.metrics.late_alexnet_correct[epoch] = np.mean(all_per_correct)
+    record.metrics.late_alexnet_dist[epoch] = np.mean(all_l2dist_list)
+    
+    print('mid')
+    for i,f in enumerate(evaluate_models.alexnet_model.features):
+        if i > 4:
+            evaluate_models.alexnet_model.features[i] = nn.Identity()   # take mid alexnet features
+    all_per_correct, all_l2dist_list = train_utils.two_way_identification(all_brain_recons, all_true_images, evaluate_models.alexnet_model.features, evaluate_models.alexnet_preprocess, device)
+    record.metrics.mid_alexnet_correct[epoch] = np.mean(all_per_correct)
+    record.metrics.mid_alexnet_dist[epoch] = np.mean(all_l2dist_list)
+    
+    for i,f in enumerate(evaluate_models.alexnet_model.features):
+        if i > 1:
+            evaluate_models.alexnet_model.features[i] = nn.Identity()   # take early alexnet features
+    all_per_correct, all_l2dist_list = train_utils.two_way_identification(all_brain_recons, all_true_images, evaluate_models.alexnet_model.features, evaluate_models.alexnet_preprocess, device)
+    record.metrics.early_alexnet_correct[epoch] = np.mean(all_per_correct)
+    record.metrics.early_alexnet_dist[epoch] = np.mean(all_l2dist_list)
+    
+    all_per_correct, all_l2dist_list = train_utils.two_way_identification(all_brain_recons, all_true_images, evaluate_models.inception_v3_model , evaluate_models.inception_v3_preprocess, device)
+    record.metrics.inception_correct[epoch] = np.mean(all_per_correct)
+    record.metrics.inception_dist[epoch] = np.mean(all_l2dist_list)
     
     if rank == 0:
         record.curr_epoch = epoch
 
-
-        #if val_acc1 > record.best_val_acc1:
-        #    record.best_model = copy.deepcopy(model.state_dict())
-        #    record.best_val_acc1 = max(val_acc1, record.best_val_acc1)
-
-        #record.metrics.train_losses[epoch] = train_losses
-        #record.metrics.train_acc5[epoch] = train_acc5
-        #record.metrics.train_acc1[epoch] = train_acc1
-        #record.metrics.val_losses[epoch] = val_losses
-        #record.metrics.val_acc5[epoch] = val_acc5
-        #record.metrics.val_acc1[epoch] = val_acc1
-
         # Save models
-        name_module_pairs = [('Generator', Generator), ('Discriminator', Discriminator), ('Generator_ema', Generator_ema), ('augment_pipeline', augment_pipeline)]
+        name_module_pairs = [('Generator', Lafite_model.Generator), ('Discriminator', Lafite_model.Discriminator), ('Generator_ema', Lafite_model.Generator_ema), ('augment_pipeline', Lafite_model.augment_pipeline)]
         for name, module in name_module_pairs:
             if module is not None:
                 if train_params.num_gpus > 1:
@@ -755,15 +837,26 @@ def after_epoch_callback(epoch, rank, record, record_model,
                 record_model[name] = copy.deepcopy(module).eval().requires_grad_(False).cpu().state_dict()
 
         # Save optimizers
-        record_model.Generator_opt = Generator_opt.state_dict()
-        record_model.Discriminator_opt = Discriminator_opt.state_dict()
+        record_model.Generator_opt = Lafite_optimizers.Generator_opt.state_dict()
+        record_model.Discriminator_opt = Lafite_optimizers.Discriminator_opt.state_dict()
 
         train_utils.save_checkpoint(record, save_dir = save_params.save_dir, filename = save_params.exp_name)
         train_utils.save_checkpoint(record_model, save_dir = save_params.save_dir, filename = f"weights_{save_params.exp_name}")
 
-def train(rank, phases, train_params, save_params, train_dl, val_dl, augment_pipeline, resnet_preprocess, clip_extractor, fMRI_to_image_mapper, fMRI_to_text_mapper, 
-          Generator, Generator_ema, Discriminator, resnet, Generator_opt, Discriminator_opt, subj01_annots, record, 
-          record_model, device):
+    # Reset evaluation networks
+    alexnet_model = alexnet(weights=AlexNet_Weights.DEFAULT).eval()
+    alexnet_model.requires_grad_(False)
+    alexnet_preprocess = AlexNet_Weights.DEFAULT.transforms()
+     
+    inception_v3_model = inception_v3(weights=Inception_V3_Weights.DEFAULT).eval()
+    inception_v3_model.requires_grad_(False)
+    inception_v3_preprocess = Inception_V3_Weights.DEFAULT.transforms()
+    
+    evaluate_models = dnnlib.EasyDict(
+        alexnet_model=alexnet_model, alexnet_preprocess=alexnet_preprocess,
+        inception_v3_model=inception_v3_model, inception_v3_preprocess=inception_v3_preprocess
+    )
+def train(rank, phases, train_params, save_params, train_dl, val_dl, subj01_annots, resnet_preprocess, Lafite_model, evaluate_models, Lafite_optimizers, record, record_model, device, tmp_dir):
     pbar = tqdm.tqdm(range(train_params.num_train_epochs),ncols=250)
     pl_mean = torch.zeros([], device=device)
     cur_nimg = 0
@@ -772,15 +865,15 @@ def train(rank, phases, train_params, save_params, train_dl, val_dl, augment_pip
         for batch_idx, (voxel, img_input, cap_id) in enumerate(train_dl):
             
             voxel = voxel.to(device).float()
-            img_emb = clip_extractor.embed_image(img_input).to(device).float()
+            img_emb = Lafite_model.clip_extractor.embed_image(img_input).to(device).float()
             #print("img_emb", img_emb.shape)
-            text_emb = clip_extractor.embed_curated_annotations(subj01_annots[cap_id]).float()
+            text_emb = Lafite_model.clip_extractor.embed_curated_annotations(subj01_annots[cap_id]).float()
             batch_size = voxel.size(0)
             #print("self.fMRI_to_image_mapper", self.fMRI_to_image_mapper)
 
              # Map fmri to clip-aligned image and text features
-            clipaligned_img_emb = fMRI_to_image_mapper(voxel)
-            clipaligned_text_emb = fMRI_to_text_mapper(voxel)
+            clipaligned_img_emb = Lafite_model.fMRI_to_image_mapper(voxel)
+            clipaligned_text_emb = Lafite_model.fMRI_to_text_mapper(voxel)
 
             # page 3 of MindReader: clamp and then normalize
             clipaligned_img_emb = F.normalize(torch.clamp(clipaligned_img_emb, -1.5, 1.5), dim=1)
@@ -789,39 +882,43 @@ def train(rank, phases, train_params, save_params, train_dl, val_dl, augment_pip
             for phase in phases:
                 if batch_idx % phase.interval != 0:
                     continue
-                pl_mean, metrics = perform_phase(phase, clipaligned_img_emb, clipaligned_text_emb, augment_pipeline, clip_extractor, Generator, Discriminator, resnet, pl_mean, train_params, img_input, device)
+                pl_mean, metrics, outputs = perform_phase(phase, clipaligned_img_emb, clipaligned_text_emb, Lafite_model, pl_mean, train_params, img_input, device)
                 
                     
-                temp_metrics_tracker = after_trainiter_callback(metrics, temp_metrics_tracker, phase, epoch, batch_idx, batch_size)
+                temp_metrics_tracker = after_trainiter_callback(outputs, metrics, temp_metrics_tracker, phase, epoch, batch_idx, batch_size, save_params, tmp_dir)
 
 
              
             
                     
             
-            temp_metrics_tracker, record = after_batch_callback(train_params, Generator, Generator_ema, Discriminator, epoch, batch_idx, cur_nimg, temp_metrics_tracker, record)
-            break
+            temp_metrics_tracker, record = after_batch_callback(train_params, Lafite_model, epoch, batch_idx, cur_nimg, temp_metrics_tracker, record)
+            if batch_idx > 5: break
         # After epoch, run
-        after_epoch_callback(epoch, rank, record, record_model,
+        after_epoch_callback(epoch, rank, phases,  record, record_model,
                          train_params, save_params,
-                             train_dl, val_dl,
-                        augment_pipeline, Generator, Generator_ema, Discriminator, resnet, Generator_opt, Discriminator_opt
+                             train_dl, val_dl, subj01_annots,
+                        Lafite_model, evaluate_models, Lafite_optimizers, device
                         )    
         
 
 def training_loop(rank, train_params, data_params, model_optim_params, save_params):
     print("Train params", train_params)
+                                
+    # Create train temporary directory
+    tmp_dir = f"{save_params.save_dir}/{save_params.exp_name.split('.')[0]}" 
+    os.mkdir(tmp_dir)
+
     device = initialize(rank, train_params)
     record, record_model = initialize_record(train_params, data_params, model_optim_params, save_params)
     
     train_dl, val_dl, augment_pipeline, subj01_annots = load_training_set(rank, train_params, data_params, device)
     
-    fMRI_to_image_mapper, fMRI_to_text_mapper, clip_extractor, Generator, Generator_ema, Discriminator, resnet, resnet_preprocess = load_models(rank, train_params, model_optim_params, augment_pipeline, device)
-    Generator_opt, Discriminator_opt = load_optimizer(Generator, Discriminator, model_optim_params)
-    phases = load_training_phases(Generator, Discriminator, Generator_opt, Discriminator_opt, model_optim_params)
+    Lafite_model, evaluate_models, resnet_preprocess = load_models(rank, train_params, model_optim_params, augment_pipeline, device)
+    Lafite_optimizers  = load_optimizer(Lafite_model, model_optim_params)
+    phases = load_training_phases(Lafite_model, Lafite_optimizers, model_optim_params)
     print("phases", [p.name for p in phases])
-    train(rank, phases, train_params, save_params, train_dl, val_dl, augment_pipeline, resnet_preprocess, clip_extractor, fMRI_to_image_mapper, fMRI_to_text_mapper, 
-          Generator, Generator_ema, Discriminator, resnet, Generator_opt, Discriminator_opt, subj01_annots, record, record_model, device)
+    train(rank, phases, train_params, save_params, train_dl, val_dl, subj01_annots, resnet_preprocess, Lafite_model, evaluate_models, Lafite_optimizers, record, record_model, device, tmp_dir)
     
 
     #Print_network_summary_tables(rank, Generator, Discriminator, model_optim_params, device)

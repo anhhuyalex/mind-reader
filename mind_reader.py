@@ -23,11 +23,17 @@ def get_parser():
             description='Pytorch training framework for general dist training')
     parser.add_argument(
             '--run_dir', 
+            # default="/gpfs/milgram/scratch60/turk-browne/an633/mind_reader", type=str, 
             default="/gpfs/milgram/scratch60/turk-browne/an633/mind_reader", type=str, 
             action='store')
     parser.add_argument(
             '--model_name', 
             default="Lafite", type=str, 
+            action='store')
+    
+    parser.add_argument(
+            '--batch_size', 
+            default=16, type=int, 
             action='store')
     parser.add_argument(
             '--num_gpus', 
@@ -43,12 +49,24 @@ def get_parser():
             action='store')
     parser.add_argument(
             '--train_url', 
-            default="/scratch/gpfs/KNORMAN/webdataset_nsd/webdataset_split/train/train_subj01_{0..49}.tar", type=str, 
+            # default="/scratch/gpfs/KNORMAN/webdataset_nsd/webdataset_split/train/train_subj01_{0..49}.tar", type=str, 
+            default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/train_subj01_{0..49}.tar", type=str, 
             action='store')
     parser.add_argument(
             '--val_url', 
-            default="/scratch/gpfs/KNORMAN/webdataset_nsd/webdataset_split/val/val_subj01_0.tar", type=str, 
+            # default="/scratch/gpfs/KNORMAN/webdataset_nsd/webdataset_split/val/val_subj01_0.tar", type=str, 
+            default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/val/val_subj01_0.tar", type=str, 
             action='store') 
+    parser.add_argument(
+            '--subjectorder_url', 
+            # default="/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_subj_indices.hdf5", type=str, 
+            default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/COCO_73k_subj_indices.hdf5", type=str, 
+            action='store')
+    parser.add_argument(
+            '--annotations_url', 
+            # default="/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_subj_indices.hdf5", type=str, 
+            default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/COCO_73k_annots_curated.npy", type=str, 
+            action='store')
 #     parser.add_argument(
 #             '--random_coefs', 
 #             default=False, 
@@ -63,6 +81,7 @@ def get_parser():
 
     
 def subprocess_fn(rank, args, temp_dir, train_params, data_params, model_optim_params, save_params):
+    print("args.run_dir", args.run_dir)
     dnnlib.util.Logger(file_name=os.path.join(args.run_dir, 'log.txt'), file_mode='a', should_flush=True)
 
     # Init torch.distributed.
@@ -183,7 +202,7 @@ def main(args, **config_kwargs):
         img_resolution = 256
     )
     # Get train parameters
-    train_params = dnnlib.EasyDict(batch_size = 16, 
+    train_params = dnnlib.EasyDict(batch_size = args.batch_size, 
                         num_train_epochs = args.num_train_epochs,
                         num_gpus = args.num_gpus,
                         random_seed = 42,
@@ -211,6 +230,8 @@ def main(args, **config_kwargs):
     data_params = dnnlib.EasyDict(
                         train_url = args.train_url,
                         val_url = args.val_url,
+                        subjectorder_url = args.subjectorder_url,
+                        annotations_url = args.annotations_url,
                         # default augmentation pipeline is 'bgc'
                         # look at augpipe_specs in utils
                         augment_kwargs = dnnlib.EasyDict(
