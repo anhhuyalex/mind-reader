@@ -75,8 +75,8 @@ def two_way_identification(all_brain_recons, all_images, model, preprocess, devi
             real = model(preprocess(all_images[irecon].to(device)).unsqueeze(0)).float().reshape(1, -1)
             # fake = model(preprocess(transforms.functional.hflip(all_images[irecon]).unsqueeze(0))).float() 
             fake = model(preprocess(recon).unsqueeze(0)).float().reshape(1, -1)
-            print("real", real.shape)
-            print("fake", fake.shape)
+            #print("real", real.shape)
+            #print("fake", fake.shape)
             rand_idx = np.random.randint(len(all_brain_recons))
             while irecon == rand_idx:
                 rand_idx = np.random.randint(len(all_brain_recons))

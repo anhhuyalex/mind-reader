@@ -796,7 +796,6 @@ def after_epoch_callback(epoch, rank, phases,  record, record_model,
         [all_brain_recons.append(im) for im in outputs['gen_img']]
         [all_true_images.append(im) for im in img_input]
         
-        if batch_idx > 5: break
             
     print('late')
     for i,f in enumerate(evaluate_models.alexnet_model.features):
@@ -893,7 +892,7 @@ def train(rank, phases, train_params, save_params, train_dl, val_dl, subj01_anno
                     
             
             temp_metrics_tracker, record = after_batch_callback(train_params, Lafite_model, epoch, batch_idx, cur_nimg, temp_metrics_tracker, record)
-            if batch_idx > 5: break
+
         # After epoch, run
         after_epoch_callback(epoch, rank, phases,  record, record_model,
                          train_params, save_params,

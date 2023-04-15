@@ -23,8 +23,8 @@ def get_parser():
             description='Pytorch training framework for general dist training')
     parser.add_argument(
             '--run_dir', 
-            # default="/gpfs/milgram/scratch60/turk-browne/an633/mind_reader", type=str, 
             default="/gpfs/milgram/scratch60/turk-browne/an633/mind_reader", type=str, 
+            # default="/gpfs/milgram/scratch60/turk-browne/an633/mind_reader", type=str, 
             action='store')
     parser.add_argument(
             '--model_name', 
@@ -49,23 +49,23 @@ def get_parser():
             action='store')
     parser.add_argument(
             '--train_url', 
-            # default="/scratch/gpfs/KNORMAN/webdataset_nsd/webdataset_split/train/train_subj01_{0..49}.tar", type=str, 
-            default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/train_subj01_{0..49}.tar", type=str, 
+            default="/scratch/gpfs/KNORMAN/webdataset_nsd/webdataset_split/train/train_subj01_{0..49}.tar", type=str, 
+            # default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/train_subj01_{0..49}.tar", type=str, 
             action='store')
     parser.add_argument(
             '--val_url', 
-            # default="/scratch/gpfs/KNORMAN/webdataset_nsd/webdataset_split/val/val_subj01_0.tar", type=str, 
-            default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/val/val_subj01_0.tar", type=str, 
+            default="/scratch/gpfs/KNORMAN/webdataset_nsd/webdataset_split/val/val_subj01_0.tar", type=str, 
+            # default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/val/val_subj01_0.tar", type=str, 
             action='store') 
     parser.add_argument(
             '--subjectorder_url', 
-            # default="/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_subj_indices.hdf5", type=str, 
-            default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/COCO_73k_subj_indices.hdf5", type=str, 
+            default="/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_subj_indices.hdf5", type=str,
+            # default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/COCO_73k_subj_indices.hdf5", type=str, 
             action='store')
     parser.add_argument(
             '--annotations_url', 
-            # default="/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_subj_indices.hdf5", type=str, 
-            default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/COCO_73k_annots_curated.npy", type=str, 
+            default="/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_annots_curated.npy", type=str, 
+            # default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/COCO_73k_annots_curated.npy", type=str, 
             action='store')
 #     parser.add_argument(
 #             '--random_coefs', 
