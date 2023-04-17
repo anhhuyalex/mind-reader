@@ -125,6 +125,13 @@ def two_way_identification_clip(all_brain_recons, all_images):
                 per_correct.append(0)
             l2dist_list.append(l2dist_fake)
     return per_correct, l2dist_list
+## ResNET
+def resnet50(layer=2, pretrained=True, **kwargs):
+    model = ResNet(Bottleneck, [3, 4, 6, 3], **kwargs)
+    emb = {1: 256, 2: 512, 3: 1024, 4: 2048}
+    if pretrained:
+        misc.load_trained_model('/home/sikun/vicreg/resnet50.pth', model)
+    return model, emb[layer]
 
 ## Save file
 def save_checkpoint(state, save_dir = "./", filename='checkpoint.pth.tar'):

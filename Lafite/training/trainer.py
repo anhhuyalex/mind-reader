@@ -441,9 +441,12 @@ def load_models(rank, train_params, model_optim_params, augment_pipeline, device
     Discriminator = networks.Discriminator(**model_optim_params.D_kwargs).train().requires_grad_(False).to(device)
     Discriminator.load_state_dict(checkpoint_lafite["D"].state_dict(), strict=False)
     
-    # Resnet
-    resnet = resnet50(weights=ResNet50_Weights.DEFAULT)
-    resnet_preprocess = ResNet50_Weights.DEFAULT.transforms()
+    # Resnet layer 2
+    resnet = torch.hub.load('facebookresearch/vicreg:main', 'resnet50')
+    resnet.layer3 = torch.nn.Identity()
+    resnet.layer4 = torch.nn.Identity()
+    resnet.avgpool = torch.nn.Identity()
+    resnet = resnet.to(device).eval()
 
     # Make evaluation networks
     alexnet_model = alexnet(weights=AlexNet_Weights.DEFAULT).to(device).eval()
@@ -475,7 +478,7 @@ def load_models(rank, train_params, model_optim_params, augment_pipeline, device
         alexnet_model=alexnet_model, alexnet_preprocess=alexnet_preprocess,
         inception_v3_model=inception_v3_model, inception_v3_preprocess=inception_v3_preprocess
     )
-    return Lafite_model, evaluate_models, resnet_preprocess
+    return Lafite_model, evaluate_models
 
 def Print_network_summary_tables(rank, G, D, model_optim_params, device):
     if rank == 0:
@@ -537,7 +540,7 @@ def get_perturbed_embeddings(clipaligned_img_emb, clipaligned_text_emb):
 def get_styles(clipaligned_img_emb_perturbed, clipaligned_text_emb_perturbed, Generator, train_params, device):
     batch_size = clipaligned_text_emb_perturbed.shape[0]
     z = torch.zeros([batch_size,Generator.z_dim], device=device) # fix z
-    c = None
+    c = None #torch.zeros([batch_size,Generator.z_dim], device=device) # fix c
     ws = Generator.mapping(z, c)
 
     if train_params.style_mixing_prob > 0:
@@ -558,9 +561,12 @@ def run_discriminator(img, fts, augment_pipeline, Discriminator):
 
 def run_res(img, resnet):
     img = train_utils.full_preprocess(img)
-    resnet_fts = resnet(img, chan_avg=False, return_layer= 2)
+    resnet_fts = resnet(img)
+    print("resnet_fts", resnet_fts.shape)
     max_vec = resnet_fts.max(1)[0]
+    print("max_vec", max_vec.shape)
     mean_vec = resnet_fts.mean(1)
+    print("mean_vec", mean_vec.shape)
     resnet_fts = max_vec / max_vec.max() + 2 * mean_vec / mean_vec.max()
     return resnet_fts.flatten(start_dim=1)
 
@@ -607,17 +613,19 @@ def perform_phase(phase, clipaligned_img_emb, clipaligned_text_emb, Lafite_model
         Lc1 = -Lc1_img_img.mean() -Lc1_txt_txt.mean()
 
         # Lc3
-        # run_res(gen_img, resnet)
-
+        gen_img_resfeats = run_res(gen_img, Lafite_model.resnet)
+        real_img_resfeats = run_res(gen_img, Lafite_model.resnet)
+        Lc3 = -train_utils.contra_loss(train_params.contrastive_params.temp, real_img_resfeats, gen_img_resfeats, train_params.contrastive_params.lam).mean()
         
         # Backward
-        loss_Generator = loss_GAN_Generator + train_params.lambda_1 * Lc1 + train_params.lambda_2 * Lc2 # + train_params.lambda_3 * Lc3
+        loss_Generator = loss_GAN_Generator + train_params.lambda_1 * Lc1 + train_params.lambda_2 * Lc2 + train_params.lambda_3 * Lc3
         loss_Generator = loss_Generator.mean().mul(phase.interval)
         # print("loss_Generator", loss_Generator)
         loss_Generator.backward()
         metrics.loss_GAN_Generator = loss_GAN_Generator.detach()
         metrics.Lc1 = Lc1.detach()
         metrics.Lc2 = Lc2.detach()
+        metrics.Lc3 = Lc3.detach()
         outputs.gen_img = gen_img
         
     elif phase.name == "Generatorreg": # path length regularization for generator
@@ -661,7 +669,7 @@ def perform_phase(phase, clipaligned_img_emb, clipaligned_text_emb, Lafite_model
         # as in page 3 of MindReader
         gen_img = Lafite_model.Generator.synthesis(ws, fts=fts, force_fp32=not torch.cuda.is_available())
 
-        # Discriminator
+        # Discriminator: minimize logits for fake images
         real_or_fake_logits, discriminator_img_emb, discriminator_txt_emb = run_discriminator(gen_img, fts, Lafite_model.augment_pipeline, Lafite_model.Discriminator)
         
         loss_Dgen = torch.nn.functional.softplus(real_or_fake_logits) # -log(1 - sigmoid(gen_logits))
@@ -847,15 +855,13 @@ def after_epoch_callback(epoch, rank, phases,  record, record_model,
     alexnet_model.requires_grad_(False)
     alexnet_preprocess = AlexNet_Weights.DEFAULT.transforms()
      
-    inception_v3_model = inception_v3(weights=Inception_V3_Weights.DEFAULT).eval()
-    inception_v3_model.requires_grad_(False)
-    inception_v3_preprocess = Inception_V3_Weights.DEFAULT.transforms()
+     
     
-    evaluate_models = dnnlib.EasyDict(
-        alexnet_model=alexnet_model, alexnet_preprocess=alexnet_preprocess,
-        inception_v3_model=inception_v3_model, inception_v3_preprocess=inception_v3_preprocess
-    )
-def train(rank, phases, train_params, save_params, train_dl, val_dl, subj01_annots, resnet_preprocess, Lafite_model, evaluate_models, Lafite_optimizers, record, record_model, device, tmp_dir):
+    evaluate_models.alexnet_model = alexnet_model
+    evaluate_models.alexnet_preprocess = alexnet_preprocess 
+    
+def train(rank, phases, train_params, save_params, train_dl, val_dl, subj01_annots, 
+          Lafite_model, evaluate_models, Lafite_optimizers, record, record_model, device, tmp_dir):
     pbar = tqdm.tqdm(range(train_params.num_train_epochs),ncols=250)
     pl_mean = torch.zeros([], device=device)
     cur_nimg = 0
@@ -913,11 +919,11 @@ def training_loop(rank, train_params, data_params, model_optim_params, save_para
     
     train_dl, val_dl, augment_pipeline, subj01_annots = load_training_set(rank, train_params, data_params, device)
     
-    Lafite_model, evaluate_models, resnet_preprocess = load_models(rank, train_params, model_optim_params, augment_pipeline, device)
+    Lafite_model, evaluate_models = load_models(rank, train_params, model_optim_params, augment_pipeline, device)
     Lafite_optimizers  = load_optimizer(Lafite_model, model_optim_params)
     phases = load_training_phases(Lafite_model, Lafite_optimizers, model_optim_params)
     print("phases", [p.name for p in phases])
-    train(rank, phases, train_params, save_params, train_dl, val_dl, subj01_annots, resnet_preprocess, Lafite_model, evaluate_models, Lafite_optimizers, record, record_model, device, tmp_dir)
+    train(rank, phases, train_params, save_params, train_dl, val_dl, subj01_annots, Lafite_model, evaluate_models, Lafite_optimizers, record, record_model, device, tmp_dir)
     
 
     #Print_network_summary_tables(rank, Generator, Discriminator, model_optim_params, device)
