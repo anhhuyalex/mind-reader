@@ -4,6 +4,9 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 
 import numpy as np
+# see https://github.com/zijin-gu/meshconv-decoding/issues/3
+from skimage.color import rgb2gray
+from skimage.metrics import structural_similarity as ssim
 
 def normalize():
     return T.Compose([
@@ -96,7 +99,7 @@ def two_way_identification(all_brain_recons, all_images, model, preprocess, devi
             l2dist_list.append(l2dist_fake)
     return per_correct, l2dist_list
 
-def two_way_identification_clip(all_brain_recons, all_images):
+def two_way_identification_clip(all_brain_recons, all_images, clip_extractor, device):
     per_correct = []
     l2dist_list = []
     for irecon, recon in enumerate(all_brain_recons):
@@ -105,7 +108,7 @@ def two_way_identification_clip(all_brain_recons, all_images):
                 print("skip")
                 continue
 
-            real = clip_extractor.embed_image(all_images[irecon].unsqueeze(0)).float()
+            real = clip_extractor.embed_image(all_images[irecon].to(device).unsqueeze(0)).float()
             fake = clip_extractor.embed_image(recon.unsqueeze(0)).float()
             rand_idx = np.random.randint(len(all_brain_recons))
             while irecon == rand_idx:
@@ -116,15 +119,38 @@ def two_way_identification_clip(all_brain_recons, all_images):
             # l2dist_rand = torch.mean(torch.sqrt((l2norm(real) - l2norm(rand))**2))
 
             # cosine similarity is faster and gives same results
-            l2dist_fake = utils.pairwise_cosine_similarity(real,fake).item()
-            l2dist_rand = utils.pairwise_cosine_similarity(real,rand).item()
+            l2dist_fake = pairwise_cosine_similarity(real,fake).item()
+            l2dist_rand = pairwise_cosine_similarity(real,rand).item()
 
             if l2dist_fake > l2dist_rand:
                 per_correct.append(1)
             else:
                 per_correct.append(0)
             l2dist_list.append(l2dist_fake)
+            
     return per_correct, l2dist_list
+
+def compute_ssim_metric(all_brain_recons, all_images):
+    ssim_list = []
+    for irecon, recon in enumerate(all_brain_recons):
+        # convert image to grayscale with rgb2grey
+        img_gray = rgb2gray(all_images[irecon].permute((1,2,0)))
+        recon_gray = rgb2gray(recon.permute((1,2,0)).detach().cpu().numpy())
+
+        ssim_score = ssim(img_gray, recon_gray, multichannel=True, gaussian_weights=True, 
+                              sigma=1.5, use_sample_covariance=False, data_range=1.0)
+        ssim_list.append(ssim_score)
+    return ssim_list
+
+def compute_pixcorr_metric(all_brain_recons, all_images):
+    pix_dist_list = []
+    for irecon, recon in enumerate(all_brain_recons):
+        #recon = recon.permute((1,2,0)).detach().cpu().numpy().flatten()
+        recon = recon.detach().cpu().numpy().flatten()
+        real = all_images[irecon].numpy().flatten()
+        pix_dist =  np.corrcoef(recon,real )[0][1]
+        pix_dist_list.append(pix_dist)
+    return pix_dist_list
 ## ResNET
 def resnet50(layer=2, pretrained=True, **kwargs):
     model = ResNet(Bottleneck, [3, 4, 6, 3], **kwargs)

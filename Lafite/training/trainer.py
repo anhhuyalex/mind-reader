@@ -324,8 +324,12 @@ def initialize_record(train_params, data_params, model_optim_params, save_params
                 early_alexnet_correct = defaultdict(list),
                 early_alexnet_dist = defaultdict(list),
                 inception_correct = defaultdict(list),
-                inception_dist = defaultdict(list)
-            ),    
+                inception_dist = defaultdict(list),
+                clip_correct = defaultdict(list),
+                clip_dist = defaultdict(list),
+                ssim = defaultdict(list),
+                pixcorr = defaultdict(list),
+            ),     
             data = dnnlib.EasyDict(
                 inputs = None,
                 labels = None
@@ -581,10 +585,10 @@ def perform_phase(phase, clipaligned_img_emb, clipaligned_text_emb, Lafite_model
     outputs = dnnlib.EasyDict()
     if phase.name == "Generatormain":
         
-        print("clipaligned_img_emb_perturbed", clipaligned_img_emb_perturbed.shape)
+        #print("clipaligned_img_emb_perturbed", clipaligned_img_emb_perturbed.shape)
         # Get styles
         ws = get_styles(clipaligned_img_emb_perturbed, clipaligned_text_emb_perturbed, Lafite_model.Generator, train_params, device)
-        print("Generatormain fts", fts.shape)
+        #print("Generatormain fts", fts.shape)
         # Generate image
         # The synthesizer automatically maps the fmri-mapped clip features to condition codes
         # as in page 3 of MindReader
@@ -614,7 +618,7 @@ def perform_phase(phase, clipaligned_img_emb, clipaligned_text_emb, Lafite_model
 
         # Lc3
         gen_img_resfeats = run_res(gen_img, Lafite_model.resnet)
-        real_img_resfeats = run_res(gen_img, Lafite_model.resnet)
+        real_img_resfeats = run_res(img_input.to(device), Lafite_model.resnet)
         Lc3 = -train_utils.contra_loss(train_params.contrastive_params.temp, real_img_resfeats, gen_img_resfeats, train_params.contrastive_params.lam).mean()
         
         # Backward
@@ -796,14 +800,18 @@ def after_epoch_callback(epoch, rank, phases,  record, record_model,
         # page 3 of MindReader: clamp and then normalize
         clipaligned_img_emb = F.normalize(torch.clamp(clipaligned_img_emb, -1.5, 1.5), dim=1)
         clipaligned_text_emb = F.normalize(torch.clamp(clipaligned_text_emb, -1.5, 1.5), dim=1)
-
+        
          
              
         pl_mean, metrics, outputs = perform_phase(phases[0], clipaligned_img_emb, clipaligned_text_emb, Lafite_model, torch.zeros([], device=device), train_params, img_input, device)
-        #print("outputs['gen_img']",outputs['gen_img'].shape)
-        [all_brain_recons.append(im) for im in outputs['gen_img']]
-        [all_true_images.append(im) for im in img_input]
-        
+        print("validate outputs['gen_img']", outputs['gen_img'].shape)
+         
+        for im in outputs['gen_img']:
+            all_brain_recons.append(im)
+        for im in img_input:
+            all_true_images.append(im)
+            
+        #if batch_idx > 5: break
             
     print('late')
     for i,f in enumerate(evaluate_models.alexnet_model.features):
@@ -832,6 +840,18 @@ def after_epoch_callback(epoch, rank, phases,  record, record_model,
     record.metrics.inception_correct[epoch] = np.mean(all_per_correct)
     record.metrics.inception_dist[epoch] = np.mean(all_l2dist_list)
     
+    all_per_correct, all_l2dist_list = train_utils.two_way_identification_clip(all_brain_recons, all_true_images, Lafite_model.clip_extractor, device)
+    record.metrics.clip_correct[epoch] = np.mean(all_per_correct)
+    record.metrics.clip_dist[epoch] = np.mean(all_l2dist_list)
+    
+    
+    ssim_list = train_utils.compute_ssim_metric(all_brain_recons, all_true_images)
+    record.metrics.ssim[epoch] = np.mean(ssim_list)
+    
+    pixcorr_list = train_utils.compute_pixcorr_metric(all_brain_recons, all_true_images)
+    record.metrics.pixcorr[epoch] = np.mean(pixcorr_list)
+    print("record.metrics", record.metrics)
+    
     if rank == 0:
         record.curr_epoch = epoch
 
@@ -851,7 +871,7 @@ def after_epoch_callback(epoch, rank, phases,  record, record_model,
         train_utils.save_checkpoint(record_model, save_dir = save_params.save_dir, filename = f"weights_{save_params.exp_name}")
 
     # Reset evaluation networks
-    alexnet_model = alexnet(weights=AlexNet_Weights.DEFAULT).eval()
+    alexnet_model = alexnet(weights=AlexNet_Weights.DEFAULT).to(device).eval()
     alexnet_model.requires_grad_(False)
     alexnet_preprocess = AlexNet_Weights.DEFAULT.transforms()
      
@@ -859,6 +879,8 @@ def after_epoch_callback(epoch, rank, phases,  record, record_model,
     
     evaluate_models.alexnet_model = alexnet_model
     evaluate_models.alexnet_preprocess = alexnet_preprocess 
+    
+    return evaluate_models
     
 def train(rank, phases, train_params, save_params, train_dl, val_dl, subj01_annots, 
           Lafite_model, evaluate_models, Lafite_optimizers, record, record_model, device, tmp_dir):
@@ -898,9 +920,9 @@ def train(rank, phases, train_params, save_params, train_dl, val_dl, subj01_anno
                     
             
             temp_metrics_tracker, record = after_batch_callback(train_params, Lafite_model, epoch, batch_idx, cur_nimg, temp_metrics_tracker, record)
-
+            #if batch_idx > 5: break
         # After epoch, run
-        after_epoch_callback(epoch, rank, phases,  record, record_model,
+        evaluate_models = after_epoch_callback(epoch, rank, phases,  record, record_model,
                          train_params, save_params,
                              train_dl, val_dl, subj01_annots,
                         Lafite_model, evaluate_models, Lafite_optimizers, device
@@ -922,7 +944,7 @@ def training_loop(rank, train_params, data_params, model_optim_params, save_para
     Lafite_model, evaluate_models = load_models(rank, train_params, model_optim_params, augment_pipeline, device)
     Lafite_optimizers  = load_optimizer(Lafite_model, model_optim_params)
     phases = load_training_phases(Lafite_model, Lafite_optimizers, model_optim_params)
-    print("phases", [p.name for p in phases])
+     
     train(rank, phases, train_params, save_params, train_dl, val_dl, subj01_annots, Lafite_model, evaluate_models, Lafite_optimizers, record, record_model, device, tmp_dir)
     
 
