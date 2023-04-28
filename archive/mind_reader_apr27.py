@@ -49,13 +49,13 @@ def get_parser():
             action='store')
     parser.add_argument(
             '--train_url', 
-            #default="/scratch/gpfs/KNORMAN/webdataset_nsd/webdataset_split/train/train_subj01_{0..49}.tar", type=str, 
-            default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/train_subj01_{0..49}.tar", type=str, 
+            default="/scratch/gpfs/KNORMAN/webdataset_nsd/webdataset_split/train/train_subj01_{0..49}.tar", type=str, 
+            #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/train_subj01_{0..49}.tar", type=str, 
             action='store')
     parser.add_argument(
             '--val_url', 
-            #default="/scratch/gpfs/KNORMAN/webdataset_nsd/webdataset_split/val/val_subj01_0.tar", type=str, 
-            default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/val/val_subj01_0.tar", type=str, 
+            default="/scratch/gpfs/KNORMAN/webdataset_nsd/webdataset_split/val/val_subj01_0.tar", type=str, 
+            #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/val/val_subj01_0.tar", type=str, 
             action='store') 
     parser.add_argument(
             '--subjectorder_url', 
@@ -229,7 +229,6 @@ def main(args, **config_kwargs):
     
     # Get data parameters
     data_params = dnnlib.EasyDict(
-                        dataset_type = "apr27",
                         train_url = args.train_url,
                         val_url = args.val_url,
                         subjectorder_url = args.subjectorder_url,

@@ -352,7 +352,8 @@ def initialize_record(train_params, data_params, model_optim_params, save_params
             )
     
     return record, record_model
-def load_training_set(rank, train_params, data_params, device):
+
+def load_webdataset(rank, train_params, data_params, device):
     # Load training set.
     num_samples = 24983
     num_workers = train_params.num_gpus
@@ -409,6 +410,13 @@ def load_training_set(rank, train_params, data_params, device):
         augment_pipeline.p.copy_(torch.as_tensor(data_params.augment_p))
     
     return train_dl, val_dl, augment_pipeline, subj01_annots
+
+
+def load_training_set(rank, train_params, data_params, device):
+    if train_params.dataset_type == "webdataset":
+        train_dl, val_dl, augment_pipeline, subj01_annots = load_webdataset(rank, train_params, data_params, device)
+        return train_dl, val_dl, augment_pipeline, subj01_annots
+
 
 def load_models(rank, train_params, model_optim_params, augment_pipeline, device):
     # Construct networks.
