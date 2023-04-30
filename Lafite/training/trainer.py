@@ -411,12 +411,59 @@ def load_webdataset(rank, train_params, data_params, device):
     
     return train_dl, val_dl, augment_pipeline, subj01_annots
 
+def load_pretrained_voxelaligned(rank, train_params, data_params, device):
+    num_workers = train_params.num_gpus
+    
+    train_data = wds.WebDataset(data_params.train_url, resampled=False) \
+        .decode("torch") \
+        .rename(images="jpg;png", voxels="nsdgeneral.npy", trial="trial.npy", coco= "coco73k.npy", reps="num_uniques.npy", \
+               idx = "__key__"
+               )\
+        .to_tuple("voxels", 'images', 'trial', "idx") \
+        .batched(train_params.batch_size, partial=True)
+    train_dl = torch.utils.data.DataLoader(train_data, batch_size=None, num_workers=num_workers, shuffle=False)
+
+
+    val_data = wds.WebDataset(data_params.val_url, resampled=False) \
+        .decode("torch") \
+        .rename(images="jpg;png", voxels="nsdgeneral.npy", trial="trial.npy", coco= "coco73k.npy", reps="num_uniques.npy", \
+               idx = "__key__" )\
+        .to_tuple("voxels", 'images', 'trial', "idx") \
+        .batched(train_params.batch_size, partial=True)
+    val_dl = torch.utils.data.DataLoader(val_data, batch_size=None, num_workers=num_workers, shuffle=False)
+
+    # Load all text annotations and select the annotations for subject 1
+    f = h5py.File(data_params.subjectorder_url, 'r')
+    subj01_order = f['subj01'][:]
+    f.close()
+    # annots = np.load('/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_annots_curated.npy',allow_pickle=True)
+    annots = np.load(data_params.annotations_url, allow_pickle=True)
+    subj01_annots = annots[subj01_order]
+
+    if rank == 0:
+        batch = next(iter(train_dl))
+        print('fMRI shape:', batch[0].shape) 
+        print(f'Image shape:', batch[1].shape)
+        print(f'Text shape:', batch[2].shape) # note that we only load the text label annotations, not the text itself !
+        print()
+
+    # Build data augmentation pipeline
+    augment_pipeline = None
+    if (data_params.augment_kwargs is not None) and (data_params.augment_p > 0 or data_params.ada_target is not None):
+        augment_pipeline = training.augment.AugmentPipe(**data_params.augment_kwargs).to(device)
+        augment_pipeline.p.copy_(torch.as_tensor(data_params.augment_p))
+    
+    return train_dl, val_dl, augment_pipeline, subj01_annots
 
 def load_training_set(rank, train_params, data_params, device):
-    if train_params.dataset_type == "webdataset":
+    if data_params.dataset_type == "webdataset":
         train_dl, val_dl, augment_pipeline, subj01_annots = load_webdataset(rank, train_params, data_params, device)
         return train_dl, val_dl, augment_pipeline, subj01_annots
-
+    elif data_params.dataset_type == "avg_split":
+        train_dl, val_dl, augment_pipeline, subj01_annots = load_pretrained_voxelaligned(rank, train_params, data_params, device)
+        return train_dl, val_dl, augment_pipeline, subj01_annots
+    else:
+        raise ValueError("train_params.dataset_type not allowed")
 
 def load_models(rank, train_params, model_optim_params, augment_pipeline, device):
     # Construct networks.
