@@ -416,13 +416,14 @@ def load_pretrained_voxelaligned(rank, train_params, data_params, device):
     
     train_data = wds.WebDataset(data_params.train_url, resampled=False) \
         .decode("torch") \
+        .shuffle(500,initial=500)\
         .rename(images="jpg;png", voxels="nsdgeneral.npy", trial="trial.npy", coco= "coco73k.npy", reps="num_uniques.npy", \
                idx = "__key__"
                )\
         .to_tuple("voxels", 'images', 'trial', "idx") \
         .batched(train_params.batch_size, partial=True)
     train_dl = torch.utils.data.DataLoader(train_data, batch_size=None, num_workers=num_workers, shuffle=False)
-
+    train_indices_batchidx_dict = torch.load(data_params.train_indices_batchidx_dict_url)
 
     val_data = wds.WebDataset(data_params.val_url, resampled=False) \
         .decode("torch") \
@@ -431,6 +432,7 @@ def load_pretrained_voxelaligned(rank, train_params, data_params, device):
         .to_tuple("voxels", 'images', 'trial', "idx") \
         .batched(train_params.batch_size, partial=True)
     val_dl = torch.utils.data.DataLoader(val_data, batch_size=None, num_workers=num_workers, shuffle=False)
+    val_indices_batchidx_dict = torch.load(data_params.val_indices_batchidx_dict_url)
 
     # Load all text annotations and select the annotations for subject 1
     f = h5py.File(data_params.subjectorder_url, 'r')
@@ -444,7 +446,7 @@ def load_pretrained_voxelaligned(rank, train_params, data_params, device):
         batch = next(iter(train_dl))
         print('fMRI shape:', batch[0].shape) 
         print(f'Image shape:', batch[1].shape)
-        print(f'Text shape:', batch[2].shape) # note that we only load the text label annotations, not the text itself !
+        print(f'Trial id shape:', batch[2].shape) # note that we only load the text label annotations, not the text itself !
         print()
 
     # Build data augmentation pipeline
@@ -453,17 +455,15 @@ def load_pretrained_voxelaligned(rank, train_params, data_params, device):
         augment_pipeline = training.augment.AugmentPipe(**data_params.augment_kwargs).to(device)
         augment_pipeline.p.copy_(torch.as_tensor(data_params.augment_p))
     
-    return train_dl, val_dl, augment_pipeline, subj01_annots
 
-def load_training_set(rank, train_params, data_params, device):
-    if data_params.dataset_type == "webdataset":
-        train_dl, val_dl, augment_pipeline, subj01_annots = load_webdataset(rank, train_params, data_params, device)
-        return train_dl, val_dl, augment_pipeline, subj01_annots
-    elif data_params.dataset_type == "avg_split":
-        train_dl, val_dl, augment_pipeline, subj01_annots = load_pretrained_voxelaligned(rank, train_params, data_params, device)
-        return train_dl, val_dl, augment_pipeline, subj01_annots
-    else:
-        raise ValueError("train_params.dataset_type not allowed")
+    subj01_vitb32text_train_pred_clips = torch.from_numpy(np.load(data_params.subj01_vitb32text_train_pred_clips_url))
+    subj01_vitb32image_train_pred_clips = torch.from_numpy(np.load(data_params.subj01_vitb32image_train_pred_clips_url))
+    subj01_vitb32text_test_pred_clips = torch.from_numpy(np.load(data_params.subj01_vitb32text_test_pred_clips_url))
+    subj01_vitb32image_test_pred_clips = torch.from_numpy(np.load(data_params.subj01_vitb32image_test_pred_clips_url))
+    
+    return train_dl, val_dl, augment_pipeline, train_indices_batchidx_dict, val_indices_batchidx_dict, subj01_vitb32text_train_pred_clips, subj01_vitb32image_train_pred_clips, subj01_vitb32text_test_pred_clips, subj01_vitb32image_test_pred_clips
+
+ 
 
 def load_models(rank, train_params, model_optim_params, augment_pipeline, device):
     # Construct networks.
@@ -832,20 +832,43 @@ def after_batch_callback(train_params, Lafite_model, epoch, batch_idx, cur_nimg,
 
 def after_epoch_callback(epoch, rank, phases,  record, record_model,
                          train_params, save_params,
-                             train_dl, val_dl, subj01_annots,
+                         #train_dl, val_dl, subj01_annots,
+                         train_dl, val_dl, subj01_vitb32text_test_pred_clips, subj01_vitb32image_test_pred_clips,
                         Lafite_model, evaluate_models, Lafite_optimizers, device
                         )   :
     # compute fid metrics
     #for metric in train_params.metrics:
     all_brain_recons = []
     all_true_images = []
-    for batch_idx, (voxel, img_input, cap_id) in enumerate(val_dl):
+    for batch_idx, (voxel, img_input,  trial, idx) in enumerate(val_dl):
             
         voxel = voxel.to(device).float()
+        print("voxel", voxel.shape)
         img_emb = Lafite_model.clip_extractor.embed_image(img_input).to(device).float()
         #print("img_emb", img_emb.shape)
         text_emb = Lafite_model.clip_extractor.embed_curated_annotations(subj01_annots[cap_id]).float()
         batch_size = voxel.size(0)
+        
+        repeat_index = batch_idx % 3
+        voxel = voxel[:,repeat_index].float()
+        train_indices_batchidx_dict, val_indices_batchidx_dict
+        dict_idx = [train_indices_batchidx_dict[idx] for idx in idxs]
+        print("voxel", voxel.shape)
+        print("img_input", img_input.shape)
+        print("idx", idxs)
+        print("dict_idx", dict_idx)
+        #img_emb = Lafite_model.clip_extractor.embed_image(img_input).to(device).float()
+        #print("img_emb", img_emb.shape)
+        #text_emb = Lafite_model.clip_extractor.embed_curated_annotations(subj01_annots[cap_id]).float()
+        batch_size = voxel.size(0)
+        #print("self.fMRI_to_image_mapper", self.fMRI_to_image_mapper)
+
+         # Map fmri to clip-aligned image and text features
+        #clipaligned_img_emb = Lafite_model.fMRI_to_image_mapper(voxel)
+        #clipaligned_text_emb = Lafite_model.fMRI_to_text_mapper(voxel)
+        clipaligned_img_emb = subj01_vitb32image_train_pred_clips[dict_idx][:,repeat_index,:].to(device)
+        clipaligned_text_emb = subj01_vitb32text_train_pred_clips[dict_idx][:,repeat_index,:].to(device)
+
         #print("self.fMRI_to_image_mapper", self.fMRI_to_image_mapper)
 
          # Map fmri to clip-aligned image and text features
@@ -937,26 +960,39 @@ def after_epoch_callback(epoch, rank, phases,  record, record_model,
     
     return evaluate_models
     
-def train(rank, phases, train_params, save_params, train_dl, val_dl, subj01_annots, 
+#def train(rank, phases, train_params, save_params, train_dl, val_dl, subj01_annots, 
+def train(rank, phases, train_params, save_params, train_dl, val_dl, train_indices_batchidx_dict, val_indices_batchidx_dict,
+          subj01_vitb32text_train_pred_clips, subj01_vitb32image_train_pred_clips,
+          subj01_vitb32text_test_pred_clips, subj01_vitb32image_test_pred_clips,
           Lafite_model, evaluate_models, Lafite_optimizers, record, record_model, device, tmp_dir):
     pbar = tqdm.tqdm(range(train_params.num_train_epochs),ncols=250)
     pl_mean = torch.zeros([], device=device)
     cur_nimg = 0
     temp_metrics_tracker = {}
     for epoch in pbar:
-        for batch_idx, (voxel, img_input, cap_id) in enumerate(train_dl):
-            
-            voxel = voxel.to(device).float()
-            img_emb = Lafite_model.clip_extractor.embed_image(img_input).to(device).float()
+        for batch_idx, (voxel, img_input,  trial, idxs) in enumerate(train_dl):
+            repeat_index = batch_idx % 3
+            voxel = voxel[:,repeat_index].float()
+            train_indices_batchidx_dict, val_indices_batchidx_dict
+            dict_idx = [train_indices_batchidx_dict[idx] for idx in idxs]
+            print("voxel", voxel.shape)
+            print("img_input", img_input.shape)
+            print("idx", idxs)
+            print("dict_idx", dict_idx)
+            #img_emb = Lafite_model.clip_extractor.embed_image(img_input).to(device).float()
             #print("img_emb", img_emb.shape)
-            text_emb = Lafite_model.clip_extractor.embed_curated_annotations(subj01_annots[cap_id]).float()
+            #text_emb = Lafite_model.clip_extractor.embed_curated_annotations(subj01_annots[cap_id]).float()
             batch_size = voxel.size(0)
             #print("self.fMRI_to_image_mapper", self.fMRI_to_image_mapper)
 
              # Map fmri to clip-aligned image and text features
-            clipaligned_img_emb = Lafite_model.fMRI_to_image_mapper(voxel)
-            clipaligned_text_emb = Lafite_model.fMRI_to_text_mapper(voxel)
-
+            #clipaligned_img_emb = Lafite_model.fMRI_to_image_mapper(voxel)
+            #clipaligned_text_emb = Lafite_model.fMRI_to_text_mapper(voxel)
+            clipaligned_img_emb = subj01_vitb32image_train_pred_clips[dict_idx][:,repeat_index,:].to(device)
+            clipaligned_text_emb = subj01_vitb32text_train_pred_clips[dict_idx][:,repeat_index,:].to(device)
+            print("clipaligned_img_emb", clipaligned_img_emb.shape)
+            print("clipaligned_text_emb", clipaligned_text_emb.shape)
+             
             # page 3 of MindReader: clamp and then normalize
             clipaligned_img_emb = F.normalize(torch.clamp(clipaligned_img_emb, -1.5, 1.5), dim=1)
             clipaligned_text_emb = F.normalize(torch.clamp(clipaligned_text_emb, -1.5, 1.5), dim=1)
@@ -975,17 +1011,20 @@ def train(rank, phases, train_params, save_params, train_dl, val_dl, subj01_anno
                     
             
             temp_metrics_tracker, record = after_batch_callback(train_params, Lafite_model, epoch, batch_idx, cur_nimg, temp_metrics_tracker, record)
-            #if batch_idx > 5: break
+            if batch_idx > 5: print("DEBUG end epoch !!!! \n\n\n\n\n"); break
         # After epoch, run
-        evaluate_models = after_epoch_callback(epoch, rank, phases,  record, record_model,
+        evaluate_models = after_epoch_callback(
+                        epoch, rank, phases,  record, record_model,
                          train_params, save_params,
-                             train_dl, val_dl, subj01_annots,
+                         #train_dl, val_dl, subj01_annots,
+                        train_dl, val_dl, subj01_vitb32text_test_pred_clips, subj01_vitb32image_test_pred_clips,
                         Lafite_model, evaluate_models, Lafite_optimizers, device
                         )    
         
 
 def training_loop(rank, train_params, data_params, model_optim_params, save_params):
     print("Train params", train_params)
+    print("Data params", data_params)
                                 
     # Create train temporary directory
     tmp_dir = f"{save_params.save_dir}/{save_params.exp_name.split('.')[0]}" 
@@ -994,13 +1033,16 @@ def training_loop(rank, train_params, data_params, model_optim_params, save_para
     device = initialize(rank, train_params)
     record, record_model = initialize_record(train_params, data_params, model_optim_params, save_params)
     
-    train_dl, val_dl, augment_pipeline, subj01_annots = load_training_set(rank, train_params, data_params, device)
+    train_dl, val_dl, augment_pipeline, train_indices_batchidx_dict, val_indices_batchidx_dict, subj01_vitb32text_train_pred_clips, subj01_vitb32image_train_pred_clips, subj01_vitb32text_test_pred_clips, subj01_vitb32image_test_pred_clips = load_pretrained_voxelaligned(rank, train_params, data_params, device)
     
     Lafite_model, evaluate_models = load_models(rank, train_params, model_optim_params, augment_pipeline, device)
     Lafite_optimizers  = load_optimizer(Lafite_model, model_optim_params)
     phases = load_training_phases(Lafite_model, Lafite_optimizers, model_optim_params)
      
-    train(rank, phases, train_params, save_params, train_dl, val_dl, subj01_annots, Lafite_model, evaluate_models, Lafite_optimizers, record, record_model, device, tmp_dir)
+    #train(rank, phases, train_params, save_params, train_dl, val_dl, subj01_annots, Lafite_model, evaluate_models, Lafite_optimizers, record, record_model, device, tmp_dir)
+    train(rank, phases, train_params, save_params, train_dl, val_dl, train_indices_batchidx_dict, val_indices_batchidx_dict,
+          subj01_vitb32text_train_pred_clips, subj01_vitb32image_train_pred_clips, subj01_vitb32text_test_pred_clips, subj01_vitb32image_test_pred_clips,
+          Lafite_model, evaluate_models, Lafite_optimizers, record, record_model, device, tmp_dir)
     
 
     #Print_network_summary_tables(rank, Generator, Discriminator, model_optim_params, device)

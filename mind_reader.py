@@ -53,10 +53,21 @@ def get_parser():
             #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/train_subj01_{0..49}.tar", type=str, 
             action='store')
     parser.add_argument(
+            '--train_indices_batchidx_dict_url', 
+            default="/scratch/gpfs/KNORMAN/webdataset_nsd/webdataset_avg_split/train/train_subj01_{0..17}.tar", type=str, 
+            #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/train_subj01_{0..49}.tar", type=str, 
+            action='store')
+    parser.add_argument(
             '--val_url', 
             default="/scratch/gpfs/KNORMAN/webdataset_nsd/webdataset_avg_split/val/val_subj01_0.tar", type=str, 
             #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/val/val_subj01_0.tar", type=str, 
             action='store') 
+    parser.add_argument(
+            '--val_indices_batchidx_dict_url', 
+            default="/scratch/gpfs/KNORMAN/webdataset_nsd/webdataset_avg_split/val/val_subj01_0.tar", type=str, 
+            #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/val/val_subj01_0.tar", type=str, 
+            action='store') 
+            
     parser.add_argument(
             '--subjectorder_url', 
             default="/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_subj_indices.hdf5", type=str,
@@ -67,6 +78,28 @@ def get_parser():
             default="/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_annots_curated.npy", type=str, 
             #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/COCO_73k_annots_curated.npy", type=str, 
             action='store')
+    parser.add_argument(
+            '--subj01_vitb32text_train_pred_clips_url', 
+            default="/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_annots_curated.npy", type=str, 
+            #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/COCO_73k_annots_curated.npy", type=str, 
+            action='store')
+    parser.add_argument(
+            '--subj01_vitb32image_train_pred_clips_url', 
+            default="/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_annots_curated.npy", type=str, 
+            #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/COCO_73k_annots_curated.npy", type=str, 
+            action='store')
+    parser.add_argument(
+            '--subj01_vitb32text_test_pred_clips_url', 
+            default="/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_annots_curated.npy", type=str, 
+            #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/COCO_73k_annots_curated.npy", type=str, 
+            action='store')
+    parser.add_argument(
+            '--subj01_vitb32image_test_pred_clips_url', 
+            default="/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_annots_curated.npy", type=str, 
+            #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/COCO_73k_annots_curated.npy", type=str, 
+            action='store')
+    
+    
 #     parser.add_argument(
 #             '--random_coefs', 
 #             default=False, 
@@ -231,7 +264,13 @@ def main(args, **config_kwargs):
     data_params = dnnlib.EasyDict(
                         dataset_type = "avg_split",
                         train_url = args.train_url,
+                        train_indices_batchidx_dict_url = args.train_indices_batchidx_dict_url,
                         val_url = args.val_url,
+                        val_indices_batchidx_dict_url = args.val_indices_batchidx_dict_url, 
+                        subj01_vitb32text_train_pred_clips_url = args.subj01_vitb32text_train_pred_clips_url,
+                        subj01_vitb32image_train_pred_clips_url = args.subj01_vitb32image_train_pred_clips_url,
+                        subj01_vitb32text_test_pred_clips_url = args.subj01_vitb32text_test_pred_clips_url,
+                        subj01_vitb32image_test_pred_clips_url = args.subj01_vitb32image_test_pred_clips_url,
                         subjectorder_url = args.subjectorder_url,
                         annotations_url = args.annotations_url,
                         # default augmentation pipeline is 'bgc'

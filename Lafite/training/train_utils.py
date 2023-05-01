@@ -8,6 +8,21 @@ import numpy as np
 from skimage.color import rgb2gray
 from skimage.metrics import structural_similarity as ssim
 
+def voxel_select(voxels):
+    if voxels.ndim == 2:
+        return voxels
+    choice = torch.rand(1)
+    # random combine
+    if choice <= 0.5:
+        weights = torch.rand(voxels.shape[0], voxels.shape[1])[:,:,None].to(voxels.device)
+        return (weights * voxels).sum(1)/weights.sum(1)
+    # mean
+    if choice <= 0.8:
+        return voxels.mean(1)
+    # random select
+    randints = torch.randint(0, voxels.shape[1], (voxels.shape[0],))
+    return voxels[torch.arange(voxels.shape[0]), randints]
+
 def normalize():
     return T.Compose([
         T.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
