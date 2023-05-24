@@ -1,5 +1,4 @@
 import torch
-print("Torch version", torch.__version__)
 from torch import nn
 
 from Lafite import dnnlib
@@ -14,17 +13,11 @@ import os
 import datetime
 
 def get_parser():
-    """
-    Possible save_dir
-        "/gpfs/scratch60/turk-browne/an633/aha"
-        "/gpfs/milgram/scratch60/turk-browne/an633/aha"
-    """
     parser = argparse.ArgumentParser(
             description='Pytorch training framework for general dist training')
     parser.add_argument(
             '--run_dir', 
-            default="/gpfs/milgram/scratch60/turk-browne/an633/mind_reader", type=str, 
-            # default="/gpfs/milgram/scratch60/turk-browne/an633/mind_reader", type=str, 
+            default="", type=str, 
             action='store')
     parser.add_argument(
             '--model_name', 
@@ -49,63 +42,40 @@ def get_parser():
             action='store')
     parser.add_argument(
             '--train_url', 
-            default="/scratch/gpfs/KNORMAN/webdataset_nsd/webdataset_avg_split/train/train_subj01_{0..17}.tar", type=str, 
-            #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/train_subj01_{0..49}.tar", type=str, 
+            type=str, 
             action='store')
     parser.add_argument(
             '--train_indices_batchidx_dict_url', 
-            default="/scratch/gpfs/KNORMAN/webdataset_nsd/webdataset_avg_split/train/train_subj01_{0..17}.tar", type=str, 
-            #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/train_subj01_{0..49}.tar", type=str, 
+            type=str, 
             action='store')
     parser.add_argument(
             '--val_url', 
-            default="/scratch/gpfs/KNORMAN/webdataset_nsd/webdataset_avg_split/val/val_subj01_0.tar", type=str, 
-            #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/val/val_subj01_0.tar", type=str, 
+            type=str, 
             action='store') 
     parser.add_argument(
-            '--val_indices_batchidx_dict_url', 
-            default="/scratch/gpfs/KNORMAN/webdataset_nsd/webdataset_avg_split/val/val_subj01_0.tar", type=str, 
-            #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/val/val_subj01_0.tar", type=str, 
+            '--val_indices_batchidx_dict_url', type=str, 
             action='store') 
             
     parser.add_argument(
-            '--subjectorder_url', 
-            default="/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_subj_indices.hdf5", type=str,
-            #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/COCO_73k_subj_indices.hdf5", type=str, 
+            '--subjectorder_url', type=str,
             action='store')
     parser.add_argument(
-            '--annotations_url', 
-            default="/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_annots_curated.npy", type=str, 
-            #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/COCO_73k_annots_curated.npy", type=str, 
+            '--annotations_url', type=str, 
             action='store')
     parser.add_argument(
-            '--subj01_vitb32text_train_pred_clips_url', 
-            default="/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_annots_curated.npy", type=str, 
-            #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/COCO_73k_annots_curated.npy", type=str, 
+            '--subj01_vitb32text_train_pred_clips_url', type=str, 
             action='store')
     parser.add_argument(
-            '--subj01_vitb32image_train_pred_clips_url', 
-            default="/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_annots_curated.npy", type=str, 
-            #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/COCO_73k_annots_curated.npy", type=str, 
+            '--subj01_vitb32image_train_pred_clips_url', type=str, 
             action='store')
     parser.add_argument(
-            '--subj01_vitb32text_test_pred_clips_url', 
-            default="/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_annots_curated.npy", type=str, 
-            #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/COCO_73k_annots_curated.npy", type=str, 
+            '--subj01_vitb32text_test_pred_clips_url', type=str, 
             action='store')
     parser.add_argument(
-            '--subj01_vitb32image_test_pred_clips_url', 
-            default="/scratch/gpfs/KNORMAN/nsdgeneral_hdf5/COCO_73k_annots_curated.npy", type=str, 
-            #default="/gpfs/milgram/scratch60/turk-browne/an633/nsd/COCO_73k_annots_curated.npy", type=str, 
+            '--subj01_vitb32image_test_pred_clips_url', type=str, 
             action='store')
     
-    
-#     parser.add_argument(
-#             '--random_coefs', 
-#             default=False, 
-#             type=lambda x: (str(x).lower() in ['true','1', 'yes']))
-   
-    
+     
     parser.add_argument('-d', '--debug', help="in debug mode or not", 
                         action='store_true')
 
@@ -135,15 +105,9 @@ def subprocess_fn(rank, args, temp_dir, train_params, data_params, model_optim_p
         custom_ops.verbosity = 'none'
 
     # Execute training loop.
-    # training.training_loop.training_loop(rank=rank, **vars(args))
     training.trainer.training_loop(rank=rank, train_params=train_params, data_params=data_params, 
                                    model_optim_params=model_optim_params, save_params=save_params)
-    
-#     train_params.rank = rank
-#     trainer = training.trainer.MindReader_Trainer(train_params = train_params,
-#                                                  data_params = data_params,
-#                                                  model_optim_params = model_optim_params)
-#     trainer.train()
+     
     
 def main(args, **config_kwargs):
     """Train a GAN using the techniques described in the paper
@@ -185,47 +149,6 @@ def main(args, **config_kwargs):
     dnnlib.util.Logger(should_flush=True)
 
     # Setup training options.
-#     try:
-#         run_desc, args = utils.setup_training_loop_kwargs(**config_kwargs)
-#     except utils.UserError as err:
-#         ctx.fail(err)
-
-#     # Pick output directory.
-#     prev_run_dirs = []
-#     if os.path.isdir(outdir):
-#         prev_run_dirs = [x for x in os.listdir(outdir) if os.path.isdir(os.path.join(outdir, x))]
-#     prev_run_ids = [re.match(r'^\d+', x) for x in prev_run_dirs]
-#     prev_run_ids = [int(x.group()) for x in prev_run_ids if x is not None]
-#     cur_run_id = max(prev_run_ids, default=-1) + 1
-#     args.run_dir = os.path.join(outdir, f'{cur_run_id:05d}-{run_desc}')
-#     assert not os.path.exists(args.run_dir)
-
-#     # Print options.
-#     print()
-#     print('Training options:')
-#     print(json.dumps(args, indent=2))
-#     print()
-#     print(f'Output directory:   {args.run_dir}')
-#     print(f'Training data:      {args.training_set_kwargs.path}')
-#     print(f'Training duration:  {args.total_kimg} kimg')
-#     print(f'Number of GPUs:     {args.num_gpus}')
-#     print(f'Number of images:   {args.training_set_kwargs.max_size}')
-#     print(f'Image resolution:   {args.training_set_kwargs.resolution}')
-#     print(f'Conditional model:  {args.training_set_kwargs.use_labels}')
-#     print(f'Dataset x-flips:    {args.training_set_kwargs.xflip}')
-#     print(f'Discriminator use normalization:  {args.d_use_norm}')
-#     print(f'Discriminator use fts: {args.d_use_fts}')
-
-#     # Dry run?
-#     if dry_run:
-#         print('Dry run; exiting.')
-#         return
-
-#     # Create output directory.
-#     print('Creating output directory...')
-#     os.makedirs(args.run_dir)
-#     with open(os.path.join(args.run_dir, 'training_options.json'), 'wt') as f:
-#         json.dump(args, f, indent=2)
     
     # default params
     defaults = dnnlib.EasyDict(
