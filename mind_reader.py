@@ -257,7 +257,8 @@ def main(args, **config_kwargs):
                            ema_kimg = defaults.mb * 10 / 32,
                            ema_rampup = 0.05,
                         ),
-                        metrics = ['fid50k_full']
+                        metrics = ['fid50k_full'],
+                        normalize_fmrialigned_embds = False
                     )
     
     # Get data parameters

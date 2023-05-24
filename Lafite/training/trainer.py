@@ -649,6 +649,7 @@ def perform_phase(phase, clipaligned_img_emb, clipaligned_text_emb, Lafite_model
         # as in page 3 of MindReader
         gen_img = Lafite_model.Generator.synthesis(ws, fts=fts, force_fp32=not torch.cuda.is_available())
         outputs['gen_img'] = gen_img.detach().clone()
+        outputs['img_input'] = img_input.detach().clone()
         # Discriminator
         real_or_fake_logits, discriminator_img_emb, discriminator_txt_emb = run_discriminator(gen_img, fts, Lafite_model.augment_pipeline, Lafite_model.Discriminator)
 
@@ -769,10 +770,10 @@ def perform_phase(phase, clipaligned_img_emb, clipaligned_text_emb, Lafite_model
     return pl_mean, metrics, outputs
     
     
-def after_trainiter_callback(outputs, metrics, temp_metrics_tracker, phase, epoch, batch_idx, batch_size, save_params, tmp_dir, tracker_init = [[],0]):
+def after_trainiter_callback(outputs, metrics, temp_metrics_tracker, phase, epoch, batch_idx, batch_size, save_params, tracker_init = [[],0]):
     # Save image outputs
     if phase.name == "Generatormain":
-        torch.save(outputs, f"{tmp_dir}/Generatormain_batch{batch_idx}.pt")
+        torch.save(outputs, f"{save_params.tmp_dir}/Generatormain_batch{batch_idx}.pt")
         
     for metric in metrics:
         try:
@@ -833,104 +834,100 @@ def after_batch_callback(train_params, Lafite_model, epoch, batch_idx, cur_nimg,
 def after_epoch_callback(epoch, rank, phases,  record, record_model,
                          train_params, save_params,
                          #train_dl, val_dl, subj01_annots,
-                         train_dl, val_dl, subj01_vitb32text_test_pred_clips, subj01_vitb32image_test_pred_clips,
+                         train_dl, val_dl, 
+                         subj01_vitb32text_test_pred_clips, subj01_vitb32image_test_pred_clips, val_indices_batchidx_dict,
                         Lafite_model, evaluate_models, Lafite_optimizers, device
                         )   :
     # compute fid metrics
     #for metric in train_params.metrics:
     all_brain_recons = []
     all_true_images = []
-    for batch_idx, (voxel, img_input,  trial, idx) in enumerate(val_dl):
+    for batch_idx, (voxel, img_input,  trial, idxs) in enumerate(val_dl):
+        batch_size = len(idxs) 
+        if batch_size != train_params.batch_size:    
+            # the last batch in the epoch breaks Lafite
+            num_of_tiles = train_params.batch_size // batch_size
+
+
+            remainder = train_params.batch_size % batch_size
+            idxs = idxs * num_of_tiles   + idxs[:remainder]
+            voxel = torch.cat([torch.cat([voxel] * num_of_tiles ), voxel[:remainder]])
+            img_input = torch.cat([torch.cat([img_input] * num_of_tiles ), img_input[:remainder]])
+            trial = torch.cat([torch.cat([trial] * num_of_tiles ), trial[:remainder]])
             
-        voxel = voxel.to(device).float()
-        print("voxel", voxel.shape)
-        img_emb = Lafite_model.clip_extractor.embed_image(img_input).to(device).float()
-        #print("img_emb", img_emb.shape)
-        text_emb = Lafite_model.clip_extractor.embed_curated_annotations(subj01_annots[cap_id]).float()
-        batch_size = voxel.size(0)
+        # voxel_repeats = voxel_repeats.to(device).float()
+        dict_idx = [val_indices_batchidx_dict[idx] for idx in idxs]
+         
         
-        repeat_index = batch_idx % 3
-        voxel = voxel[:,repeat_index].float()
-        train_indices_batchidx_dict, val_indices_batchidx_dict
-        dict_idx = [train_indices_batchidx_dict[idx] for idx in idxs]
-        print("voxel", voxel.shape)
+        print("TEST voxel", voxel.shape)
+
         print("img_input", img_input.shape)
         print("idx", idxs)
         print("dict_idx", dict_idx)
-        #img_emb = Lafite_model.clip_extractor.embed_image(img_input).to(device).float()
-        #print("img_emb", img_emb.shape)
-        #text_emb = Lafite_model.clip_extractor.embed_curated_annotations(subj01_annots[cap_id]).float()
-        batch_size = voxel.size(0)
-        #print("self.fMRI_to_image_mapper", self.fMRI_to_image_mapper)
 
-         # Map fmri to clip-aligned image and text features
-        #clipaligned_img_emb = Lafite_model.fMRI_to_image_mapper(voxel)
-        #clipaligned_text_emb = Lafite_model.fMRI_to_text_mapper(voxel)
-        clipaligned_img_emb = subj01_vitb32image_train_pred_clips[dict_idx][:,repeat_index,:].to(device)
-        clipaligned_text_emb = subj01_vitb32text_train_pred_clips[dict_idx][:,repeat_index,:].to(device)
-
-        #print("self.fMRI_to_image_mapper", self.fMRI_to_image_mapper)
-
-         # Map fmri to clip-aligned image and text features
-        clipaligned_img_emb = Lafite_model.fMRI_to_image_mapper(voxel)
-        clipaligned_text_emb = Lafite_model.fMRI_to_text_mapper(voxel)
-
-        # page 3 of MindReader: clamp and then normalize
-        clipaligned_img_emb = F.normalize(torch.clamp(clipaligned_img_emb, -1.5, 1.5), dim=1)
-        clipaligned_text_emb = F.normalize(torch.clamp(clipaligned_text_emb, -1.5, 1.5), dim=1)
+        clipaligned_img_emb = subj01_vitb32image_test_pred_clips[dict_idx].to(device)
+        clipaligned_text_emb = subj01_vitb32text_test_pred_clips[dict_idx].to(device)
+        print("TEST clipaligned_img_emb", clipaligned_img_emb.shape)
+        print("TEST clipaligned_text_emb", clipaligned_text_emb.shape)
         
-         
-             
+        # page 3 of MindReader: clamp and then normalize
+        if train_params.normalize_fmrialigned_embds == True:
+            clipaligned_img_emb = F.normalize(torch.clamp(clipaligned_img_emb, -1.5, 1.5), dim=1)
+            clipaligned_text_emb = F.normalize(torch.clamp(clipaligned_text_emb, -1.5, 1.5), dim=1)
+
+
+
         pl_mean, metrics, outputs = perform_phase(phases[0], clipaligned_img_emb, clipaligned_text_emb, Lafite_model, torch.zeros([], device=device), train_params, img_input, device)
         print("validate outputs['gen_img']", outputs['gen_img'].shape)
-         
+
         for im in outputs['gen_img']:
             all_brain_recons.append(im)
         for im in img_input:
             all_true_images.append(im)
             
-        #if batch_idx > 5: break
+        #if batch_idx > 30:  print("DEBUG end validation !!!! \n\n\n\n\n"); break
             
-    print('late')
-    for i,f in enumerate(evaluate_models.alexnet_model.features):
-        if i > 7:
-            evaluate_models.alexnet_model.features[i] = nn.Identity()   # take late alexnet features
-    all_per_correct, all_l2dist_list = train_utils.two_way_identification(all_brain_recons, all_true_images, evaluate_models.alexnet_model.features, evaluate_models.alexnet_preprocess, device)
-    record.metrics.late_alexnet_correct[epoch] = np.mean(all_per_correct)
-    record.metrics.late_alexnet_dist[epoch] = np.mean(all_l2dist_list)
+#     print('late')
+#     for i,f in enumerate(evaluate_models.alexnet_model.features):
+#         if i > 7:
+#             evaluate_models.alexnet_model.features[i] = nn.Identity()   # take late alexnet features
+#     all_per_correct, all_l2dist_list = train_utils.two_way_identification(all_brain_recons, all_true_images, evaluate_models.alexnet_model.features, evaluate_models.alexnet_preprocess, device)
+#     record.metrics.late_alexnet_correct[epoch] = np.mean(all_per_correct)
+#     record.metrics.late_alexnet_dist[epoch] = np.mean(all_l2dist_list)
     
-    print('mid')
-    for i,f in enumerate(evaluate_models.alexnet_model.features):
-        if i > 4:
-            evaluate_models.alexnet_model.features[i] = nn.Identity()   # take mid alexnet features
-    all_per_correct, all_l2dist_list = train_utils.two_way_identification(all_brain_recons, all_true_images, evaluate_models.alexnet_model.features, evaluate_models.alexnet_preprocess, device)
-    record.metrics.mid_alexnet_correct[epoch] = np.mean(all_per_correct)
-    record.metrics.mid_alexnet_dist[epoch] = np.mean(all_l2dist_list)
+#     print('mid')
+#     for i,f in enumerate(evaluate_models.alexnet_model.features):
+#         if i > 4:
+#             evaluate_models.alexnet_model.features[i] = nn.Identity()   # take mid alexnet features
+#     all_per_correct, all_l2dist_list = train_utils.two_way_identification(all_brain_recons, all_true_images, evaluate_models.alexnet_model.features, evaluate_models.alexnet_preprocess, device)
+#     record.metrics.mid_alexnet_correct[epoch] = np.mean(all_per_correct)
+#     record.metrics.mid_alexnet_dist[epoch] = np.mean(all_l2dist_list)
     
-    for i,f in enumerate(evaluate_models.alexnet_model.features):
-        if i > 1:
-            evaluate_models.alexnet_model.features[i] = nn.Identity()   # take early alexnet features
-    all_per_correct, all_l2dist_list = train_utils.two_way_identification(all_brain_recons, all_true_images, evaluate_models.alexnet_model.features, evaluate_models.alexnet_preprocess, device)
-    record.metrics.early_alexnet_correct[epoch] = np.mean(all_per_correct)
-    record.metrics.early_alexnet_dist[epoch] = np.mean(all_l2dist_list)
+#     for i,f in enumerate(evaluate_models.alexnet_model.features):
+#         if i > 1:
+#             evaluate_models.alexnet_model.features[i] = nn.Identity()   # take early alexnet features
+#     all_per_correct, all_l2dist_list = train_utils.two_way_identification(all_brain_recons, all_true_images, evaluate_models.alexnet_model.features, evaluate_models.alexnet_preprocess, device)
+#     record.metrics.early_alexnet_correct[epoch] = np.mean(all_per_correct)
+#     record.metrics.early_alexnet_dist[epoch] = np.mean(all_l2dist_list)
     
-    all_per_correct, all_l2dist_list = train_utils.two_way_identification(all_brain_recons, all_true_images, evaluate_models.inception_v3_model , evaluate_models.inception_v3_preprocess, device)
-    record.metrics.inception_correct[epoch] = np.mean(all_per_correct)
-    record.metrics.inception_dist[epoch] = np.mean(all_l2dist_list)
+#     all_per_correct, all_l2dist_list = train_utils.two_way_identification(all_brain_recons, all_true_images, evaluate_models.inception_v3_model , evaluate_models.inception_v3_preprocess, device)
+#     record.metrics.inception_correct[epoch] = np.mean(all_per_correct)
+#     record.metrics.inception_dist[epoch] = np.mean(all_l2dist_list)
     
-    all_per_correct, all_l2dist_list = train_utils.two_way_identification_clip(all_brain_recons, all_true_images, Lafite_model.clip_extractor, device)
-    record.metrics.clip_correct[epoch] = np.mean(all_per_correct)
-    record.metrics.clip_dist[epoch] = np.mean(all_l2dist_list)
+#     all_per_correct, all_l2dist_list = train_utils.two_way_identification_clip(all_brain_recons, all_true_images, Lafite_model.clip_extractor, device)
+#     record.metrics.clip_correct[epoch] = np.mean(all_per_correct)
+#     record.metrics.clip_dist[epoch] = np.mean(all_l2dist_list)
     
     
-    ssim_list = train_utils.compute_ssim_metric(all_brain_recons, all_true_images)
-    record.metrics.ssim[epoch] = np.mean(ssim_list)
+#     ssim_list = train_utils.compute_ssim_metric(all_brain_recons, all_true_images)
+#     record.metrics.ssim[epoch] = np.mean(ssim_list)
     
-    pixcorr_list = train_utils.compute_pixcorr_metric(all_brain_recons, all_true_images)
-    record.metrics.pixcorr[epoch] = np.mean(pixcorr_list)
-    print("record.metrics", record.metrics)
+#     pixcorr_list = train_utils.compute_pixcorr_metric(all_brain_recons, all_true_images)
+#     record.metrics.pixcorr[epoch] = np.mean(pixcorr_list)
+#     print("record.metrics", record.metrics)
     
     if rank == 0:
+
         record.curr_epoch = epoch
 
         # Save models
@@ -948,15 +945,20 @@ def after_epoch_callback(epoch, rank, phases,  record, record_model,
         train_utils.save_checkpoint(record, save_dir = save_params.save_dir, filename = save_params.exp_name)
         train_utils.save_checkpoint(record_model, save_dir = save_params.save_dir, filename = f"weights_{save_params.exp_name}")
 
+        validate_outputs = dict(
+            all_brain_recons = all_brain_recons,
+            all_true_images = all_true_images
+        )
+        train_utils.save_checkpoint(validate_outputs, save_dir = save_params.tmp_dir, filename = f"epoch{epoch}.pt")
     # Reset evaluation networks
-    alexnet_model = alexnet(weights=AlexNet_Weights.DEFAULT).to(device).eval()
-    alexnet_model.requires_grad_(False)
-    alexnet_preprocess = AlexNet_Weights.DEFAULT.transforms()
+#     alexnet_model = alexnet(weights=AlexNet_Weights.DEFAULT).to(device).eval()
+#     alexnet_model.requires_grad_(False)
+#     alexnet_preprocess = AlexNet_Weights.DEFAULT.transforms()
      
      
     
-    evaluate_models.alexnet_model = alexnet_model
-    evaluate_models.alexnet_preprocess = alexnet_preprocess 
+#     evaluate_models.alexnet_model = alexnet_model
+#     evaluate_models.alexnet_preprocess = alexnet_preprocess 
     
     return evaluate_models
     
@@ -964,16 +966,37 @@ def after_epoch_callback(epoch, rank, phases,  record, record_model,
 def train(rank, phases, train_params, save_params, train_dl, val_dl, train_indices_batchidx_dict, val_indices_batchidx_dict,
           subj01_vitb32text_train_pred_clips, subj01_vitb32image_train_pred_clips,
           subj01_vitb32text_test_pred_clips, subj01_vitb32image_test_pred_clips,
-          Lafite_model, evaluate_models, Lafite_optimizers, record, record_model, device, tmp_dir):
+          Lafite_model, evaluate_models, Lafite_optimizers, record, record_model, device):
     pbar = tqdm.tqdm(range(train_params.num_train_epochs),ncols=250)
     pl_mean = torch.zeros([], device=device)
     cur_nimg = 0
     temp_metrics_tracker = {}
     for epoch in pbar:
         for batch_idx, (voxel, img_input,  trial, idxs) in enumerate(train_dl):
+#             if batch_idx > 5: print("DEBUG end epoch !!!! \n\n\n\n\n"); break
+#             if batch_idx == 5:  
+#                 section = 11
+#                 idxs = idxs[:section]
+#                 img_input = img_input[:section]
+#                 voxel = voxel[:section]
+#                 trial = trial[:section] 
+                
+                
             repeat_index = batch_idx % 3
             voxel = voxel[:,repeat_index].float()
-            train_indices_batchidx_dict, val_indices_batchidx_dict
+            batch_size = len(idxs) 
+            if batch_size != train_params.batch_size:    
+                # the last batch in the epoch breaks Lafite
+                num_of_tiles = train_params.batch_size // batch_size
+                
+                 
+                remainder = train_params.batch_size % batch_size
+                idxs =  idxs * num_of_tiles   + idxs[:remainder]
+                voxel = torch.cat([torch.cat([voxel] * num_of_tiles ), voxel[:remainder]])
+                img_input = torch.cat([torch.cat([img_input] * num_of_tiles ), img_input[:remainder]])
+                trial = torch.cat([torch.cat([trial] * num_of_tiles ), trial[:remainder]])
+                 
+                
             dict_idx = [train_indices_batchidx_dict[idx] for idx in idxs]
             print("voxel", voxel.shape)
             print("img_input", img_input.shape)
@@ -982,20 +1005,23 @@ def train(rank, phases, train_params, save_params, train_dl, val_dl, train_indic
             #img_emb = Lafite_model.clip_extractor.embed_image(img_input).to(device).float()
             #print("img_emb", img_emb.shape)
             #text_emb = Lafite_model.clip_extractor.embed_curated_annotations(subj01_annots[cap_id]).float()
-            batch_size = voxel.size(0)
+            
+                
             #print("self.fMRI_to_image_mapper", self.fMRI_to_image_mapper)
 
              # Map fmri to clip-aligned image and text features
             #clipaligned_img_emb = Lafite_model.fMRI_to_image_mapper(voxel)
             #clipaligned_text_emb = Lafite_model.fMRI_to_text_mapper(voxel)
+            
             clipaligned_img_emb = subj01_vitb32image_train_pred_clips[dict_idx][:,repeat_index,:].to(device)
             clipaligned_text_emb = subj01_vitb32text_train_pred_clips[dict_idx][:,repeat_index,:].to(device)
             print("clipaligned_img_emb", clipaligned_img_emb.shape)
             print("clipaligned_text_emb", clipaligned_text_emb.shape)
              
             # page 3 of MindReader: clamp and then normalize
-            clipaligned_img_emb = F.normalize(torch.clamp(clipaligned_img_emb, -1.5, 1.5), dim=1)
-            clipaligned_text_emb = F.normalize(torch.clamp(clipaligned_text_emb, -1.5, 1.5), dim=1)
+            if train_params.normalize_fmrialigned_embds == True:
+                clipaligned_img_emb = F.normalize(torch.clamp(clipaligned_img_emb, -1.5, 1.5), dim=1)
+                clipaligned_text_emb = F.normalize(torch.clamp(clipaligned_text_emb, -1.5, 1.5), dim=1)
             
             for phase in phases:
                 if batch_idx % phase.interval != 0:
@@ -1003,7 +1029,7 @@ def train(rank, phases, train_params, save_params, train_dl, val_dl, train_indic
                 pl_mean, metrics, outputs = perform_phase(phase, clipaligned_img_emb, clipaligned_text_emb, Lafite_model, pl_mean, train_params, img_input, device)
                 
                     
-                temp_metrics_tracker = after_trainiter_callback(outputs, metrics, temp_metrics_tracker, phase, epoch, batch_idx, batch_size, save_params, tmp_dir)
+                temp_metrics_tracker = after_trainiter_callback(outputs, metrics, temp_metrics_tracker, phase, epoch, batch_idx, batch_size, save_params)
 
 
              
@@ -1011,13 +1037,14 @@ def train(rank, phases, train_params, save_params, train_dl, val_dl, train_indic
                     
             
             temp_metrics_tracker, record = after_batch_callback(train_params, Lafite_model, epoch, batch_idx, cur_nimg, temp_metrics_tracker, record)
-            if batch_idx > 5: print("DEBUG end epoch !!!! \n\n\n\n\n"); break
+            
         # After epoch, run
         evaluate_models = after_epoch_callback(
                         epoch, rank, phases,  record, record_model,
                          train_params, save_params,
                          #train_dl, val_dl, subj01_annots,
-                        train_dl, val_dl, subj01_vitb32text_test_pred_clips, subj01_vitb32image_test_pred_clips,
+                        train_dl, val_dl, 
+                        subj01_vitb32text_test_pred_clips, subj01_vitb32image_test_pred_clips, val_indices_batchidx_dict,
                         Lafite_model, evaluate_models, Lafite_optimizers, device
                         )    
         
@@ -1027,8 +1054,8 @@ def training_loop(rank, train_params, data_params, model_optim_params, save_para
     print("Data params", data_params)
                                 
     # Create train temporary directory
-    tmp_dir = f"{save_params.save_dir}/{save_params.exp_name.split('.')[0]}" 
-    os.mkdir(tmp_dir)
+    save_params.tmp_dir = f"{save_params.save_dir}/{save_params.exp_name.split('.')[0]}" 
+    os.mkdir(save_params.tmp_dir)
 
     device = initialize(rank, train_params)
     record, record_model = initialize_record(train_params, data_params, model_optim_params, save_params)
@@ -1039,10 +1066,10 @@ def training_loop(rank, train_params, data_params, model_optim_params, save_para
     Lafite_optimizers  = load_optimizer(Lafite_model, model_optim_params)
     phases = load_training_phases(Lafite_model, Lafite_optimizers, model_optim_params)
      
-    #train(rank, phases, train_params, save_params, train_dl, val_dl, subj01_annots, Lafite_model, evaluate_models, Lafite_optimizers, record, record_model, device, tmp_dir)
+    #train(rank, phases, train_params, save_params, train_dl, val_dl, subj01_annots, Lafite_model, evaluate_models, Lafite_optimizers, record, record_model, device)
     train(rank, phases, train_params, save_params, train_dl, val_dl, train_indices_batchidx_dict, val_indices_batchidx_dict,
           subj01_vitb32text_train_pred_clips, subj01_vitb32image_train_pred_clips, subj01_vitb32text_test_pred_clips, subj01_vitb32image_test_pred_clips,
-          Lafite_model, evaluate_models, Lafite_optimizers, record, record_model, device, tmp_dir)
+          Lafite_model, evaluate_models, Lafite_optimizers, record, record_model, device)
     
 
     #Print_network_summary_tables(rank, Generator, Discriminator, model_optim_params, device)
