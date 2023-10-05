@@ -21,6 +21,7 @@
 source activate neu502b
 python -u download.py
 # export MODEL_SAVE_FOLDER='/home/an633/project/CuriousContrast/results_alex'
+# cd /scratch/gpfs/qanguyen/mind_reader_workdir/MindEyeV2/src/
 # srun --pty -p della-gpu -c 2 -t 4:00:00 --gres=gpu:1 --mem-per-cpu=10G bash
 # srun --pty -p psych_gpu -c 2 -t 4:00:00 --gres=gpu:1 --mem-per-cpu=10G bash
 # sbatch hipp.sh 2 && sbatch hipp.sh 4 && sbatch hipp.sh 8 && sbatch hipp.sh 12 && sbatch hipp.sh 20 && sbatch hipp.sh 30 && sbatch hipp.sh 40 

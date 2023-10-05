@@ -33,8 +33,6 @@ import torch
 import torch.nn as nn
 from torchvision import transforms
 
-# tf32 data type is faster than standard float32
-torch.backends.cuda.matmul.allow_tf32 = True
 
 # custom functions #
 import utils
@@ -59,6 +57,9 @@ print("LOCAL RANK ", local_rank)
 # global_batch_size = 128
                           
 ### Multi-GPU config ###
+
+torch.backends.cuda.matmul.allow_tf32 = True
+
 from accelerate import Accelerator, DeepSpeedPlugin
 num_devices = torch.cuda.device_count()
 if num_devices==0: num_devices = 1
@@ -72,11 +73,19 @@ if num_devices <= 1 and utils.is_interactive():
     os.environ["GLOBAL_BATCH_SIZE"] = "128" # set this to your batch size!
     global_batch_size = os.environ["GLOBAL_BATCH_SIZE"]
 
+# set GLOBAL_BATCH_SIZE if not already set
+try: 
+    print("GLOBAL_BATCH_SIZE", os.environ["GLOBAL_BATCH_SIZE"])
+except:
+    os.environ["GLOBAL_BATCH_SIZE"] = "128" # set this to your batch size!
+
 # alter the deepspeed config according to your global and local batch size
 if local_rank == 0:
     with open('deepspeed_config_stage2.json', 'r') as file:
         config = json.load(file)
+     
     config['train_batch_size'] = int(os.environ["GLOBAL_BATCH_SIZE"])
+     
     config['train_micro_batch_size_per_gpu'] = int(os.environ["GLOBAL_BATCH_SIZE"]) // num_devices
     with open('deepspeed_config_stage2.json', 'w') as file:
         json.dump(config, file)
@@ -85,7 +94,7 @@ else:
     time.sleep(10)
 deepspeed_plugin = DeepSpeedPlugin("deepspeed_config_stage2.json")
 accelerator = Accelerator(split_batches=False, deepspeed_plugin=deepspeed_plugin)
-
+print("\033[94m" + f"INFO: Using deepspeed_plugin {deepspeed_plugin} accelerator {accelerator}" + "\033[0m")
 
 # In[ ]:
 
@@ -125,7 +134,7 @@ if utils.is_interactive():
 
 # In[4]:
 
-
+# python Train.py --data_path=/scratch/gpfs/KNORMAN/mindeyev2 --model_name=test --subj=1 --batch_size=128 --n_samples_save=0 \--max_lr=3e-5 --mixup_pct=.66 --num_epochs=12 --ckpt_interval=999 
 parser = argparse.ArgumentParser(description="Model Training Configuration")
 parser.add_argument(
     "--model_name", type=str, default="testing",
@@ -143,11 +152,17 @@ parser.add_argument(
     help="Batch size can be increased by 10x if only training v2c and not diffusion prior",
 )
 parser.add_argument(
-    "--wandb_log",action=argparse.BooleanOptionalAction,default=False,
+    "--wandb_log",
+    # action=argparse.BooleanOptionalAction,
+    action='store_true',
+    default=False,
     help="whether to log to wandb",
 )
 parser.add_argument(
-    "--resume_from_ckpt",action=argparse.BooleanOptionalAction,default=False,
+    "--resume_from_ckpt",
+    # action=argparse.BooleanOptionalAction,
+    action='store_true',
+    default=False,
     help="if not using wandb and want to resume from a ckpt",
 )
 parser.add_argument(
@@ -159,7 +174,10 @@ parser.add_argument(
     help="proportion of way through training when to switch from BiMixCo to SoftCLIP",
 )
 parser.add_argument(
-    "--use_image_aug",action=argparse.BooleanOptionalAction,default=True,
+    "--use_image_aug",
+    action='store_true',
+    # action=argparse.BooleanOptionalAction,
+    default=False,
     help="whether to use image augmentation",
 )
 parser.add_argument(
@@ -170,7 +188,10 @@ parser.add_argument(
     "--lr_scheduler_type",type=str,default='cycle',choices=['cycle','linear'],
 )
 parser.add_argument(
-    "--ckpt_saving",action=argparse.BooleanOptionalAction,default=True,
+    "--ckpt_saving",
+    action='store_true',
+    # action=argparse.BooleanOptionalAction,
+    default=True,
 )
 parser.add_argument(
     "--ckpt_interval",type=int,default=5,
@@ -191,6 +212,7 @@ if utils.is_interactive():
     args = parser.parse_args(jupyter_args)
 else:
     args = parser.parse_args()
+
 
 # create global variables without the args prefix
 for attribute_name in vars(args).keys():
@@ -219,6 +241,9 @@ if use_image_aug:
         same_on_batch=False,
         data_keys=["input"],
     )
+else:
+    # print in red
+    print ("\033[91m" + "WARNING: not using image augmentation" + "\033[0m")
 
 
 # # Prep data, models, and dataloaders
@@ -231,6 +256,8 @@ if use_image_aug:
 if subj==1:
     num_train = 24958
     num_test = 2770
+    # print in blue 
+    print("\033[94m" + f"INFO: Using subj1, num_train {num_train}, num_test {num_test}" + "\033[0m")
 test_batch_size = num_test
 
 def my_split_by_node(urls): return urls
@@ -256,34 +283,6 @@ test_data = wds.WebDataset(test_url,resampled=False,nodesplitter=my_split_by_nod
 test_dl = torch.utils.data.DataLoader(test_data, batch_size=test_batch_size, shuffle=False, drop_last=False, pin_memory=True)
 
 
-# ### check dataloaders are working
-
-# In[7]:
-
-
-# test_indices = []
-# test_images = []
-# for test_i, (behav, past_behav, future_behav, old_behav) in enumerate(test_dl):
-#     test_indices = np.append(test_indices, behav[:,0,5].numpy())
-#     test_images = np.append(test_images, behav[:,0,0].numpy())
-# test_indices = test_indices.astype(np.int16)
-# print(test_i, (test_i+1) * test_batch_size, len(test_indices))
-# print("---\n")
-
-# train_indices = []
-# train_images = []
-# for train_i, (behav, past_behav, future_behav, old_behav) in enumerate(train_dl):
-#     train_indices = np.append(train_indices, behav[:,0,5].long().numpy())
-#     train_images = np.append(train_images, behav[:,0,0].numpy())
-# train_indices = train_indices.astype(np.int16)
-# print(train_i, (train_i+1) * batch_size, len(train_indices))
-
-
-# ## Load voxel betas, K-means clustering model, and images
-
-# In[8]:
-
-
 # load betas
 f = h5py.File(f'{data_path}/betas_all_subj0{subj}.hdf5', 'r')
 voxels = f['betas'][:]
@@ -295,11 +294,47 @@ print("voxels", voxels.shape)
 num_voxels = voxels.shape[-1]
 
 # load orig images
-f = h5py.File(f'{data_path}/coco_images_224_float16.hdf5', 'r')
-images = f['images'][:]
-images = torch.Tensor(images).to("cpu").half()
-print("images", images.shape)
+# f = h5py.File(f'{data_path}/coco_images_224_float16.hdf5', 'r')
+# images = f['images'][:]
+# images = torch.Tensor(images).to("cpu").half()
+# print("images", images.shape)
 
+class H5Dataset(torch.utils.data.Dataset):
+    """
+    Dataset for loading h5 files
+    """ 
+
+    def __init__(self, h5_path, transform=None):
+        """
+        Args:
+            h5_path (string): Path to the h5 file
+            transform (callable, optional): Optional transform to be applied
+                on a sample.
+        """
+        super(H5Dataset, self).__init__()
+        self.h5_path = h5_path
+        self.transform = transform
+
+    def __len__(self):
+        with h5py.File(self.h5_path, 'r') as f:
+            return f['images'].shape[0]
+
+    def get_image(self, idx):
+        with h5py.File(self.h5_path, 'r') as f:
+            image = f['images'][idx]
+            image = torch.Tensor(image).to("cpu").half()
+            if self.transform:
+                image = self.transform(image)
+        return image
+
+    def __getitem__(self, idxs):
+        if isinstance(idxs, torch.Tensor):
+            images = torch.stack([self.get_image(int(idx)) for idx in idxs], dim=0)
+            return images 
+        else:
+            return self.get_image(idxs) 
+        
+images = H5Dataset(f'{data_path}/coco_images_224_float16.hdf5')
 
 # In[9]:
 
@@ -307,9 +342,7 @@ print("images", images.shape)
 from models import Clipper
 eva02_model = Clipper("ViT-L/14", device=torch.device(f"cuda:{local_rank}"), hidden_state=True, norm_embs=True)
 
-clip_seq_dim = 257
-clip_emb_dim = 768
-hidden_dim = 4096
+
 
 
 # In[10]:
@@ -335,7 +368,9 @@ class RidgeRegression(torch.nn.Module):
         self.linear = torch.nn.Linear(input_size, out_features)
     def forward(self, x):
         return self.linear(x)
-        
+clip_seq_dim = 257
+clip_emb_dim = 768
+hidden_dim = 4096
 model.ridge = RidgeRegression(voxels.shape[1], out_features=hidden_dim)
 utils.count_params(model.ridge)
 utils.count_params(model)
@@ -563,60 +598,66 @@ for epoch in progress_bar:
     bwd_percent_correct = 0.
     test_fwd_percent_correct = 0.
     test_bwd_percent_correct = 0.
-
-    for train_i, (behav, past_behav, future_behav, old_behav) in enumerate(train_dl):
-        with torch.cuda.amp.autocast():
-            optimizer.zero_grad()
-
-            voxel = voxels[behav[:,0,5].cpu().long()].to(device)
-            image = images[behav[:,0,0].cpu().long()].to(device)
+    batches_proc = 0
+    # for train_i, (behav, past_behav, future_behav, old_behav) in enumerate(train_dl):
+        # print("behav", behav.shape, behav[:,0,5].cpu().long())
+        # break 
+    #     # behav: behavioral data (image index, run, trial, time, voxel)
+    #     with torch.cuda.amp.autocast():
+    #         optimizer.zero_grad()
             
-            if use_image_aug: image = img_augment(image)
+    #         voxel = voxels[behav[:,0,5].cpu().long()].to(device)
+    #         image = images[behav[:,0,0].cpu().long()].to(device)
+    #         batches_proc += len(voxel)
+    #         if use_image_aug: image = img_augment(image)
+    #         # print in red image.float().size() 
+    #         print ("\033[91m" + "image.float().size()"  + "\033[0m", image.float().size())
             
-            clip_target = eva02_model.embed_image(image.float())
-            assert not torch.any(torch.isnan(clip_target))
+    #         clip_target = eva02_model.embed_image(image.float())
+    #         assert not torch.any(torch.isnan(clip_target))
 
-            if epoch < int(mixup_pct * num_epochs):
-                voxel, perm, betas, select = utils.mixco(voxel)
+    #         if epoch < int(mixup_pct * num_epochs):
+    #             voxel, perm, betas, select = utils.mixco(voxel)
 
-            voxel_ridge = model.ridge(voxel)
+    #         voxel_ridge = model.ridge(voxel)
             
-            clip_voxels = model.backbone(voxel_ridge)
+    #         clip_voxels = model.backbone(voxel_ridge)
             
-            clip_voxels_norm = nn.functional.normalize(clip_voxels.flatten(1), dim=-1)
-            clip_target_norm = nn.functional.normalize(clip_target.flatten(1), dim=-1)
+    #         clip_voxels_norm = nn.functional.normalize(clip_voxels.flatten(1), dim=-1)
+    #         clip_target_norm = nn.functional.normalize(clip_target.flatten(1), dim=-1)
 
-            if epoch < int(mixup_pct * num_epochs):                
-                loss_clip = utils.mixco_nce(
-                    clip_voxels_norm,
-                    clip_target_norm,
-                    temp=.006, 
-                    perm=perm, betas=betas, select=select)
-            else:
-                epoch_temp = soft_loss_temps[epoch-int(mixup_pct*num_epochs)]
-                loss_clip = utils.soft_clip_loss(
-                    clip_voxels_norm,
-                    clip_target_norm,
-                    temp=epoch_temp)
+    #         if epoch < int(mixup_pct * num_epochs):                
+    #             loss_clip = utils.mixco_nce(
+    #                 clip_voxels_norm,
+    #                 clip_target_norm,
+    #                 temp=.006, 
+    #                 perm=perm, betas=betas, select=select)
+    #         else:
+    #             epoch_temp = soft_loss_temps[epoch-int(mixup_pct*num_epochs)]
+    #             loss_clip = utils.soft_clip_loss(
+    #                 clip_voxels_norm,
+    #                 clip_target_norm,
+    #                 temp=epoch_temp)
                 
-            loss = loss_clip
+    #         loss = loss_clip
             
-            utils.check_loss(loss)
+    #         utils.check_loss(loss)
 
-            accelerator.backward(loss)
-            optimizer.step()
+    #         accelerator.backward(loss)
+    #         optimizer.step()
     
-            losses.append(loss.item())
-            lrs.append(optimizer.param_groups[0]['lr'])
+    #         losses.append(loss.item())
+    #         lrs.append(optimizer.param_groups[0]['lr'])
     
-            # forward and backward top 1 accuracy        
-            labels = torch.arange(len(clip_target_norm)).to(clip_voxels_norm.device) 
-            fwd_percent_correct += utils.topk(utils.batchwise_cosine_similarity(clip_voxels_norm, clip_target_norm), labels, k=1)
-            bwd_percent_correct += utils.topk(utils.batchwise_cosine_similarity(clip_target_norm, clip_voxels_norm), labels, k=1)
+    #         # forward and backward top 1 accuracy        
+    #         labels = torch.arange(len(clip_target_norm)).to(clip_voxels_norm.device) 
+    #         fwd_percent_correct += utils.topk(utils.batchwise_cosine_similarity(clip_voxels_norm, clip_target_norm), labels, k=1)
+    #         bwd_percent_correct += utils.topk(utils.batchwise_cosine_similarity(clip_target_norm, clip_voxels_norm), labels, k=1)
 
-            if lr_scheduler_type is not None:
-                lr_scheduler.step()
+    #         if lr_scheduler_type is not None:
+    #             lr_scheduler.step()
 
+    print ("batches_proc", batches_proc)
     model.eval()
     for test_i, (behav, past_behav, future_behav, old_behav) in enumerate(test_dl):
         with torch.no_grad():
@@ -626,19 +667,22 @@ for epoch in progress_bar:
                 
                 ## Average same-image repeats ##
                 if test_image is None:
-                    voxel = voxels[behav[:,0,5].cpu().long()]
+                    voxel = voxels[behav[:,0,5].cpu().long()].to(device)
                     image = behav[:,0,0].cpu().long()
-                    
+                    # image = images[behav[:,0,0].cpu().long()].to(device)
                     unique_image, sort_indices = torch.unique(image, return_inverse=True)
+                    print ("image.size()", image.size(), unique_image.size())
                     for im in unique_image:
                         locs = torch.where(im == image)[0]
                         if test_image is None:
                             test_image = images[im][None]
+                            test_image = images[[im]]
+                            print ("test_image ", test_image.shape)
                             test_voxel = torch.mean(voxel[locs],axis=0)[None]
                         else:
-                            test_image = torch.vstack((test_image, images[im][None]))
+                            test_image = torch.vstack((test_image, images[[im]] ))
                             test_voxel = torch.vstack((test_voxel, torch.mean(voxel[locs],axis=0)[None]))
-    
+                        print ("test_image", test_image.shape, "test_voxel", test_voxel.shape)
                 # random sample of 300
                 random_indices = torch.randperm(len(test_voxel))[:300]
                 voxel = test_voxel[random_indices].to(device)

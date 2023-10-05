@@ -21,6 +21,8 @@ import requests
 import io
 import time 
 
+import pickle
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def is_interactive():
@@ -300,3 +302,48 @@ def get_dataloaders(
     val_dl = torch.utils.data.DataLoader(val_data, batch_size=val_batch_size, num_workers=1, shuffle=False, drop_last=True)
 
     return train_dl, val_dl, num_train, num_val
+
+class dotdict(dict):
+    """dot.notation access to dictionary attributes"""
+    """default dict"""
+    def __init__(self, *args, **kwargs):
+        if 'default' in kwargs:
+            self.default = kwargs['default']
+            del kwargs['default']
+        else:
+            self.default = None
+        dict.__init__(self, *args, **kwargs)
+        
+    def __repr__(self):
+        return 'defaultdict(%s, %s)' % (self.default,
+                                        dict.__repr__(self))
+
+    def __missing__(self, key):
+        if self.default is not None:
+            return self.default
+        else:
+            raise KeyError(key) 
+    def __getitem__(self, key):
+        try:
+            return dict.__getitem__(self, key)
+        except KeyError:
+            return self.__missing__(key)
+    def __getattr__(self, key):
+        if key.startswith('__') and key.endswith('__'):
+            return super(DictionaryLike, self).__getattr__(key)
+        return self.__getitem__(key)
+    
+    def items(self):
+        return [(i, self.__getitem__(i)) for i in self.__iter__() if i != 'default']
+            
+    def leng(self):
+        return self.__len__() - 1
+    
+    __setattr__ = dict.__setitem__
+    __delattr__ = dict.__delitem__
+    def __getstate__(self): return self.__dict__
+    def __setstate__(self, d): self.__dict__.update(d)
+
+def save_file_pickle(fname, file):
+    with open(fname, "wb") as f:
+        pickle.dump(file, f)
