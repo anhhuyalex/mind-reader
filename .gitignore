@@ -2,6 +2,7 @@
 fmri_clip_contra.py
 *.DS_Store
 *.pyc
+*cache
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
