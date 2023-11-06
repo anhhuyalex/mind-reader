@@ -19,7 +19,7 @@ from torchvision import transforms
 
 import utils
 from accelerate import Accelerator, DeepSpeedPlugin
-from diffusers import AutoencoderKL
+# from diffusers import AutoencoderKL
 from diffusers.models.vae import Decoder
 
 from models import Clipper
@@ -57,48 +57,59 @@ def setup_gpu_configs():
         os.environ["GLOBAL_BATCH_SIZE"] = "128" # set this to your batch size!
     return num_devices
 
-def get_deepspeed_accelerator(num_devices):
+def get_deepspeed_accelerator(args, num_devices):
     # alter the deepspeed config according to your global and local batch size
     if local_rank == 0:
         with open('deepspeed_config_stage2.json', 'r') as file:
             config = json.load(file)
-        
         config['train_batch_size'] = int(os.environ["GLOBAL_BATCH_SIZE"])
-        
-        config['train_micro_batch_size_per_gpu'] = int(os.environ["GLOBAL_BATCH_SIZE"]) // num_devices
+        config['train_micro_batch_size_per_gpu'] = args.batch_size
+        config['bf16'] = {'enabled': False}
+        config['fp16'] = {'enabled': True}
         with open('deepspeed_config_stage2.json', 'w') as file:
             json.dump(config, file)
     else:
         # give some time for the local_rank=0 gpu to prep new deepspeed config file
         time.sleep(10)
 
+    
     deepspeed_plugin = DeepSpeedPlugin("deepspeed_config_stage2.json")
     accelerator = Accelerator(split_batches=False, deepspeed_plugin=deepspeed_plugin)
-    print("\033[94m" + f"INFO: Using deepspeed_plugin {deepspeed_plugin} accelerator {accelerator}" + "\033[0m")
+    print("\033[94m" + f"INFO: Using deepspeed_plugin {deepspeed_plugin} accelerator {accelerator}" + "\033[0m") 
+    args.num_devices = num_devices
     return accelerator
 
-def get_training_params(accelerator, num_devices):
-    
-    device = accelerator.device
-    print = accelerator.print # only print if local_rank=0
+def get_training_params(accelerator):
+    print = accelerator.print
     print("PID of this process =",os.getpid())
+    device = accelerator.device
     print("device:",device)
-    num_workers = num_devices
+    num_workers = args.num_devices
     print(accelerator.state)
     world_size = accelerator.state.num_processes
     distributed = not accelerator.state.distributed_type == 'NO'
-    print("distributed =",distributed, "num_devices =", num_devices, "local rank =", local_rank, "world size =", world_size)
+    print("distributed =",distributed, "num_devices =", args.num_devices, "local rank =", local_rank, "world size =", world_size)
     
+    # set data_type to match your mixed precision (automatically set based on deepspeed config)
+    if accelerator.mixed_precision == "bf16":
+        data_type = torch.bfloat16
+    elif accelerator.mixed_precision == "fp16":
+        data_type = torch.float16
+    else:
+        data_type = torch.float32
 
-    return device, num_workers, world_size, distributed, print
+    
+    return device, num_workers, world_size, distributed, print, data_type
 
 def optionally_specify_jupyter_args():
     if utils.is_interactive():
         # Example use
         jupyter_args = f"--data_path=/fsx/proj-fmri/shared/mindeyev2_dataset \
                         --model_name=test \
-                        --subj=1 --batch_size={global_batch_size} --n_samples_save=0 \
-                        --max_lr=3e-4 --mixup_pct=.66 --num_epochs=12 --ckpt_interval=999 --no-use_image_aug"
+                        --subj=1 --batch_size={global_batch_size} \
+                        --no-blurry_recon --no-depth_recon \
+                        --clip_scale=1. --blur_scale=100. --depth_scale=100. \
+                        --max_lr=3e-4 --mixup_pct=.66 --num_epochs=12 --ckpt_interval=999 --no-use_image_aug --no-ckpt_saving"
 
         jupyter_args = jupyter_args.split()
         print(jupyter_args)
@@ -125,13 +136,7 @@ def get_parser_args(num_devices):
         "--batch_size", type=int, default=32,
         help="Batch size can be increased by 10x if only training v2c and not diffusion prior",
     )
-    parser.add_argument(
-        "--wandb_log",
-        # action=argparse.BooleanOptionalAction,
-        action='store_true',
-        default=False,
-        help="whether to log to wandb",
-    )
+   
     parser.add_argument(
         "--resume_from_ckpt",
         # action=argparse.BooleanOptionalAction,
@@ -139,13 +144,30 @@ def get_parser_args(num_devices):
         default=False,
         help="if not using wandb and want to resume from a ckpt",
     )
-    parser.add_argument(
-        "--wandb_project",type=str,default="stability",
-        help="wandb project name",
-    )
+    
     parser.add_argument(
         "--mixup_pct",type=float,default=.33,
         help="proportion of way through training when to switch from BiMixCo to SoftCLIP",
+    )
+    parser.add_argument(
+        "--blurry_recon",action='store_true',
+        help="whether to output blurry reconstructions",
+    )
+    parser.add_argument(
+        "--depth_recon",action='store_true',
+        help="whether to output depth reconstructions",
+    )
+    parser.add_argument(
+        "--blur_scale",type=float,default=100.,
+        help="multiply loss from blurry recons by this number",
+    )
+    parser.add_argument(
+        "--depth_scale",type=float,default=100.,
+        help="multiply loss from depth recons by this number",
+    )
+    parser.add_argument(
+        "--clip_scale",type=float,default=1.,
+        help="multiply contrastive loss by this number",
     )
     parser.add_argument(
         "--use_image_aug",
@@ -158,9 +180,11 @@ def get_parser_args(num_devices):
         "--num_epochs",type=int,default=240,
         help="number of epochs of training",
     )
+    # optimizer / scheduler params 
     parser.add_argument(
         "--lr_scheduler_type",type=str,default='cycle',choices=['cycle','linear'],
     )
+   
     parser.add_argument(
         "--ckpt_saving",
         action='store_true',
@@ -209,7 +233,7 @@ def get_parser_args(num_devices):
 
     # get train parameters
     if args.subj==1:
-    #     args.num_train = 24958
+        # args.num_train = 24958
         args.num_test = 2770
     args.test_batch_size = args.num_test # test batch size is the same as the number of test samples
 
@@ -223,6 +247,12 @@ def get_parser_args(num_devices):
         args.test_url = f"{args.data_path}/wds/subj0{args.subj}/test/" + "0.tar"
     else: 
         args.train_url = f"{args.data_path}/wds/subj0{args.subj}/train/" + f"{sess_str}.tar"
+        args.test_url = f"{args.data_path}/wds/subj0{args.subj}/test/" + "0.tar"
+
+    
+
+    if args.file_prefix=="sessions_1_2" :
+        args.train_url = f"{args.data_path}/wds/subj0{args.subj}/train/" + "{0..1}.tar"
         args.test_url = f"{args.data_path}/wds/subj0{args.subj}/test/" + "0.tar"
 
     # get model params
@@ -290,7 +320,7 @@ class H5Dataset(torch.utils.data.Dataset):
             return self.get_image(idxs) 
         
 
-def get_data_loaders(args):
+def get_data_loaders(args, data_type):
     def my_split_by_node(urls): return urls
     train_data = wds.WebDataset(args.train_url,resampled=False,nodesplitter=my_split_by_node)\
                     .shuffle(750, initial=1500, rng=random.Random(42))\
@@ -316,13 +346,15 @@ def get_data_loaders(args):
     f = h5py.File(f'{args.data_path}/betas_all_subj0{args.subj}.hdf5', 'r')
     voxels = f['betas'][:]
     print(f"subj0{args.subj} betas loaded into memory")
-    voxels = torch.Tensor(voxels).to("cpu").half()
+    voxels = torch.Tensor(voxels).to("cpu").to(data_type)
     if args.subj==1:
         voxels = torch.hstack((voxels, torch.zeros((len(voxels), 5))))
     print("voxels", voxels.shape)
     num_voxels = voxels.shape[-1]
 
-    images = H5Dataset(f'{args.data_path}/coco_images_224_float16.hdf5')
+    f = h5py.File(f'{args.data_path}/coco_images_224_float16.hdf5', 'r')
+    images = f['images'][:]
+    images = torch.Tensor(images).to("cpu").to(data_type) 
     return train_dl, test_dl, voxels, images
 
 class MindEyeModule(nn.Module):
@@ -341,7 +373,8 @@ class RidgeRegression(torch.nn.Module):
         return self.linear(x)
 
 class BrainNetwork(nn.Module):
-    def __init__(self, out_dim=768, in_dim=15724, clip_size=768, h=4096, n_blocks=4, norm_type='ln', act_first=False, drop=.15, blurry_dim=16):
+    def __init__(self, out_dim=768, in_dim=15724, clip_size=768, h=4096, n_blocks=4, norm_type='ln', act_first=False, drop=.15, blurry_dim=16,
+        blurry_recon = False, depth_recon = False):
         super().__init__()
         self.blurry_dim = blurry_dim
         norm_func = partial(nn.BatchNorm1d, num_features=h) if norm_type == 'bn' else partial(nn.LayerNorm, normalized_shape=h)
@@ -355,10 +388,49 @@ class BrainNetwork(nn.Module):
                 nn.Dropout(drop)
             ) for _ in range(n_blocks)
         ])
-        self.lin1 = nn.Linear(h, out_dim, bias=True)
-        self.blin1 = nn.Linear(out_dim, blurry_dim, bias=True)
+
+        if blurry_recon:
+            # self.blin1 = nn.Sequential(
+            #     nn.Linear(out_dim, 4096, bias=True),
+            #     nn.LayerNorm(4096),
+            #     nn.GELU(),
+            #     nn.Linear(4096, 4096))
+            self.blin1 = nn.Linear(h, 4096)
+            self.bgroupnorm = nn.GroupNorm(1, 256)
+            self.bupsampler = Decoder(
+                in_channels=256,
+                out_channels=128,
+                up_block_types=["UpDecoderBlock2D","UpDecoderBlock2D","UpDecoderBlock2D"],
+                block_out_channels=[32, 64, 128],
+                layers_per_block=1,
+            )
+
+        if depth_recon:
+            # self.dlin1 = nn.Sequential(
+            #         nn.Linear(h, midas_emb_size),
+            #         nn.Sigmoid(),
+            #     )
+            self.dlin1 = nn.Linear(h, 4096)
+            self.dgroupnorm = nn.GroupNorm(1, 256)
+            self.dupsampler = Decoder(
+                in_channels=256,
+                out_channels=1,#128,
+                up_block_types=["UpDecoderBlock2D","UpDecoderBlock2D","UpDecoderBlock2D","UpDecoderBlock2D"],
+                block_out_channels=[32, 64, 128, 256],
+                layers_per_block=1,
+            )
+        
         self.n_blocks = n_blocks
         self.clip_size = clip_size
+        self.clin1 = nn.Linear(h, out_dim, bias=True)
+        self.blurry_recon = blurry_recon
+        self.depth_recon = depth_recon
+
+        # low-rank matrices
+        # self.rank = 1000
+        # self.U = nn.Parameter(torch.randn(self.rank, out_dim))
+        # self.V = nn.Parameter(torch.randn(h, self.rank))
+        
         self.clip_proj = nn.Sequential(
             nn.LayerNorm(clip_size),
             nn.GELU(),
@@ -370,15 +442,10 @@ class BrainNetwork(nn.Module):
             nn.GELU(),
             nn.Linear(2048, clip_size)
         )
-        self.upsampler = Decoder(
-                in_channels=64,
-                out_channels=4,
-                up_block_types=["UpDecoderBlock2D","UpDecoderBlock2D","UpDecoderBlock2D"],
-                block_out_channels=[64, 128, 256],
-                layers_per_block=1,
-            )
         
     def forward(self, x):
+        b, d = torch.Tensor([0.]), torch.Tensor([0.])
+        data_type = x.dtype
         x = self.lin0(x)
         residual = x
         for res_block in range(self.n_blocks):
@@ -386,14 +453,32 @@ class BrainNetwork(nn.Module):
             x += residual
             residual = x
         x = x.reshape(len(x), -1)
-        x = self.lin1(x)
-        b = self.blin1(x)
-        b = self.upsampler(b.reshape(len(b), -1, 7, 7))
-        c = self.clip_proj(x.reshape(len(x), -1, self.clip_size))
-        return c, b
+
+        # linear mapping to out_dim
+        c = self.clin1(x)
+
+        # low rank linear to out dim cuts # params by nearly half compared to full linear mapping
+        # c = x @ (self.V/100) @ (self.U/100)
+
+        c = self.clip_proj(c.reshape(len(c), -1, self.clip_size))
+        if self.blurry_recon:
+            b = self.blin1(x)
+            b = b.reshape(len(b), 256, 4, 4)
+            b = self.bgroupnorm(b)
+            b = self.bupsampler(b)
+            
+        if self.depth_recon:
+            d = self.dlin1(x)#.reshape(len(x), 1, 32, 32)
+
+            d = d.reshape(len(d), 256, 4, 4)
+            d = self.dgroupnorm(d)
+            d = self.dupsampler(d)
+            
+        return c, b, d
 
 def get_models_and_optimizers(args, local_rank, num_devices):
     clip_model  = Clipper("ViT-L/14", device=torch.device(f"cuda:{local_rank}"), hidden_state=True, norm_embs=True)
+    
     model = MindEyeModule()
     model.ridge = RidgeRegression(voxels.shape[1], out_features=args.hidden_dim)
     utils.count_params(model.ridge)
@@ -403,33 +488,44 @@ def get_models_and_optimizers(args, local_rank, num_devices):
     b = torch.randn((2,1,voxels.shape[1]))
     print(b.shape, model.ridge(b).shape)
 
-    model.backbone = BrainNetwork(h=2048, in_dim=args.hidden_dim, clip_size=args.clip_emb_dim, out_dim=args.clip_emb_dim*args.clip_seq_dim, blurry_dim=64*7*7) 
+    model.backbone = BrainNetwork(h=args.hidden_dim, 
+                    in_dim=args.hidden_dim, clip_size=args.clip_emb_dim, 
+                    out_dim=args.clip_emb_dim*args.clip_seq_dim) 
+
     utils.count_params(model.backbone)
     utils.count_params(model)
 
     # test shape of model backbone output
     b = torch.randn((2,args.hidden_dim))
     print(b.shape)
-    clip_, blur_ = model.backbone(b)
-    print(clip_.shape, blur_.shape)
+    clip_, blur_, depth_  = model.backbone(b)
+    print(clip_.shape, blur_.shape, depth_.shape)
 
+
+   
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
     opt_grouped_parameters = [
         {'params': [p for n, p in model.ridge.named_parameters()], 'weight_decay': 1e-2},
         {'params': [p for n, p in model.backbone.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': 1e-2},
         {'params': [p for n, p in model.backbone.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0},
     ]
+    
+    optimizer = torch.optim.AdamW(opt_grouped_parameters, lr=args.max_lr)
 
-    optimizer = torch.optim.AdamW(opt_grouped_parameters, lr=args.max_lr, betas=(0.9, 0.95))
+    # Compute num_epochs to balance the number of gradient updates 
+    args.num_epochs = int(args.num_epochs / (args.num_train / 24958)) 
 
     if args.lr_scheduler_type == 'linear':
+         
         lr_scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer,
-            total_iters=int(args.num_epochs*(args.num_train*num_devices//batch_size)),
+            total_iters=int(np.floor(args.num_epochs*(args.num_train/args.num_devices/args.batch_size))),
             last_epoch=-1
         )
     elif args.lr_scheduler_type == 'cycle':
-        total_steps = int(args.num_epochs*(args.num_train*num_devices//args.batch_size))
+        total_steps = int(np.floor(args.num_epochs*(args.num_train/args.num_devices/args.batch_size))) 
+        
+        print("total_steps", total_steps)
         lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer, 
             max_lr=args.max_lr,
@@ -437,15 +533,11 @@ def get_models_and_optimizers(args, local_rank, num_devices):
             final_div_factor=1000,
             last_epoch=-1, pct_start=2/args.num_epochs
         )
-
-    autoenc = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16, cache_dir="./cache")
-    # autoenc.load_state_dict(torch.load('../train_logs/sdxl_vae_normed/best.pth')["model_state_dict"])
-    autoenc.eval()
-    autoenc.requires_grad_(False)
-    autoenc.to(device)
-    utils.count_params(autoenc)
+ 
 
     mse = nn.MSELoss()
+    l1 = nn.L1Loss()
+
 
     # using the same preprocessing as was used in MindEye + BrainDiffuser
     pixcorr_preprocess = transforms.Compose([
@@ -457,25 +549,7 @@ def get_models_and_optimizers(args, local_rank, num_devices):
         all_brain_recons_flattened = pixcorr_preprocess(brains).view(len(brains), -1)
         corrmean = torch.diag(utils.batchwise_pearson_correlation(all_images_flattened, all_brain_recons_flattened)).mean()
         return corrmean
-    return clip_model , model, autoenc, optimizer, lr_scheduler, mse, pixcorr
-
-def save_ckpt(tag):    
-    ckpt_path = outdir+f'/{tag}.pth'
-    print(f'saving {ckpt_path}',flush=True)
-    unwrapped_model = accelerator.unwrap_model(model)
-    try:
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': unwrapped_model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'lr_scheduler': lr_scheduler.state_dict(),
-            'train_losses': losses,
-            'test_losses': test_losses,
-            'lrs': lrs,
-            }, ckpt_path)
-    except:
-        print("Couldn't save... moving on to prevent crashing.")
-    del unwrapped_model
+    return clip_model , model, optimizer, lr_scheduler, mse, l1, pixcorr
 
 def get_record(args):
     record = utils.dotdict(
@@ -503,20 +577,19 @@ def get_record(args):
     )
     return record
 
-def train(args, local_rank, clip_model , model, autoenc,
-        optimizer, lr_scheduler, mse, pixcorr,
+def train(args, data_type, local_rank, clip_model , model,
+        optimizer, lr_scheduler, mse, l1, pixcorr,
         train_dl, test_dl, voxels, images, img_augment, record):
     epoch = 0
-    losses, test_losses, lrs = [], [], []
+    losses, lrs = [], [] 
     test_image, test_voxel = None, None
     best_test_loss = 1e9
     soft_loss_temps = utils.cosine_anneal(0.004, 0.0075, args.num_epochs - int(args.mixup_pct * args.num_epochs))
-
+ 
     print(f"{args.model_name} starting with epoch {epoch} / {args.num_epochs}")
-    progress_bar = tqdm(range(epoch,args.num_epochs), ncols=1200, disable=(local_rank!=0))
     test_image, test_voxel = None, None
-
-    for epoch in progress_bar:
+    
+    for epoch in range(epoch,args.num_epochs):
         model.train()
          
         batches_proc = 0
@@ -527,13 +600,11 @@ def train(args, local_rank, clip_model , model, autoenc,
                 optimizer.zero_grad()
                 
                 voxel = voxels[behav[:,0,5].cpu().long()].to(device)
+            
                 image = images[behav[:,0,0].cpu().long()].to(device).float()
-                blurry_image_enc = autoenc.encode(image).latent_dist.mode()
 
                 if args.use_image_aug: image = img_augment(image)
-                # print in red image.float().size() 
-                print ("\033[91m" + "image.float().size()"  + "\033[0m", image.float().size())
-                
+                 
                 clip_target = clip_model.embed_image(image)
 
                 assert not torch.any(torch.isnan(clip_target))
@@ -542,8 +613,8 @@ def train(args, local_rank, clip_model , model, autoenc,
                     voxel, perm, betas, select = utils.mixco(voxel)
 
                 voxel_ridge = model.ridge(voxel)
-                
-                clip_voxels, blurry_image_enc_ = model.backbone(voxel_ridge)
+    
+                clip_voxels, blurry_image_enc_, depth_image_enc_ = model.backbone(voxel_ridge)
                 
                 clip_voxels_norm = nn.functional.normalize(clip_voxels.flatten(1), dim=-1)
                 clip_target_norm = nn.functional.normalize(clip_target.flatten(1), dim=-1)
@@ -560,11 +631,9 @@ def train(args, local_rank, clip_model , model, autoenc,
                         clip_voxels_norm,
                         clip_target_norm, 
                         temp=epoch_temp)
-
-                    
-                loss_blurry = mse(blurry_image_enc_, blurry_image_enc) 
-                
-                loss = loss_blurry + loss_clip
+ 
+                loss_clip *= args.clip_scale
+                loss = loss_clip
                 
                 utils.check_loss(loss)
 
@@ -575,49 +644,44 @@ def train(args, local_rank, clip_model , model, autoenc,
                 lrs.append(optimizer.param_groups[0]['lr'])
         
                 record.metrics.loss_clip_total[epoch] += loss_clip.item()
-                record.metrics.loss_blurry_total[epoch] += loss_blurry.item()
                 
                 # forward and backward top 1 accuracy        
                 labels = torch.arange(len(clip_target_norm)).to(clip_voxels_norm.device) 
                 record.metrics.fwd_percent_correct[epoch] += utils.topk(utils.batchwise_cosine_similarity(clip_voxels_norm, clip_target_norm), labels, k=1) 
                 record.metrics.bwd_percent_correct[epoch] += utils.topk(utils.batchwise_cosine_similarity(clip_target_norm, clip_voxels_norm), labels, k=1) 
 
-                with torch.no_grad():
-                    # only doing pixcorr eval on a subset (8) of the samples per batch because its costly & slow to compute autoenc.decode()
-                    random_samps = np.random.choice(np.arange(len(voxel)), size=8, replace=False)
-                    blurry_recon_images = autoenc.decode(blurry_image_enc_[random_samps]).sample.clamp(0,1)
-                    record.metrics.train_blurry_pixcorr_total[epoch]  += pixcorr(image[random_samps], blurry_recon_images)
-                    
+             
+    
                 if args.lr_scheduler_type is not None:
                     lr_scheduler.step()
 
                 if args.debug and train_i > 1: break 
 
-        record, test_i, test_losses, test_image, test_voxel = validate (epoch, args, test_losses, 
+        record, test_i, test_losses_this_epoch, test_image, test_voxel = compute_validation_metrics (epoch, args, data_type, local_rank,
                 test_image, test_voxel,
                 clip_model , model, optimizer, lr_scheduler, 
                 mse, pixcorr,
                 train_dl, test_dl, voxels, images, img_augment, record)
 
-        record = compute_metrics(record, epoch, args, local_rank, train_i, test_i, losses, test_losses, lrs)
-
+        record = compute_metrics (record, epoch, args, local_rank, train_i, test_i, losses, test_losses_this_epoch, lrs)
     return record, train_i, losses, lrs
 
-def validate (epoch, args, test_losses, 
+def compute_validation_metrics (epoch, args, data_type, local_rank,
             test_image, test_voxel,
             clip_model , model, optimizer, lr_scheduler, 
             mse, pixcorr,
             train_dl, test_dl, voxels, images, img_augment, record):
+    test_losses_this_epoch = []
     model.eval()
-    for test_i, (behav, past_behav, future_behav, old_behav) in enumerate(test_dl):
-        with torch.cuda.amp.autocast():
-            with torch.no_grad():    
+    if local_rank==0:
+        with torch.no_grad(), torch.cuda.amp.autocast(dtype=data_type): 
+            for test_i, (behav, past_behav, future_behav, old_behav) in enumerate(test_dl):  
                 # all test samples should be loaded per batch such that test_i should never exceed 0
-                if len(behav) != args.num_test: print("!",len(behav),args.num_test)
-                
+                assert len(behav) == args.num_test
+
                 ## Average same-image repeats ##
                 if test_image is None:
-                    voxel = voxels[behav[:,0,5].cpu().long()].to(device)
+                    voxel = voxels[behav[:,0,5].cpu().long()]
                     image = behav[:,0,0].cpu().long()
                     # image = images[behav[:,0,0].cpu().long()].to(device)
                     unique_image, sort_indices = torch.unique(image, return_inverse=True)
@@ -625,29 +689,27 @@ def validate (epoch, args, test_losses,
                     for im in unique_image:
                         locs = torch.where(im == image)[0]
                         if test_image is None:
-                            # test_image = images[im][None]
-                            test_image = images[[im]]
-                            print ("test_image ", test_image.shape)
+                            test_image = images[im][None]
+                            # test_image = images[[im]]
+                                
                             test_voxel = torch.mean(voxel[locs],axis=0)[None]
                         else:
-                            test_image = torch.vstack((test_image, images[[im]] ))
+                            # test_image = torch.vstack((test_image, images[[im]] ))
+                            test_image = torch.vstack((test_image, images[im][None]))
                             test_voxel = torch.vstack((test_voxel, torch.mean(voxel[locs],axis=0)[None]))
-                        print ("test_image", test_image.shape, "test_voxel", test_voxel.shape)
+                            
 
                 # random sample of 300
                 random_indices = torch.randperm(len(test_voxel))[:300]
                 voxel = test_voxel[random_indices].to(device)
                 image = test_image[random_indices].to(device)
                 assert len(image) == 300
-        
-                blurry_image_enc = autoenc.encode(image).latent_dist.mode()
-        
+                
                 clip_target = clip_model.embed_image(image.float())
-    
+                
                 voxel_ridge = model.ridge(voxel)
                 
-                clip_voxels, blurry_image_enc_ = model.backbone(voxel_ridge)
-                
+                clip_voxels, blurry_image_enc_, depth_image_enc_ = model.backbone(voxel_ridge)
                 clip_voxels_norm = nn.functional.normalize(clip_voxels.flatten(1), dim=-1)
                 clip_target_norm = nn.functional.normalize(clip_target.flatten(1), dim=-1)
         
@@ -655,27 +717,24 @@ def validate (epoch, args, test_losses,
                     clip_voxels_norm,
                     clip_target_norm,
                     temp=.006)
-                    
-                loss_blurry = mse(blurry_image_enc_, blurry_image_enc)
                 
-                loss = loss_blurry + loss_clip
+                loss_clip = loss_clip * args.clip_scale
+                loss = loss_clip
+  
+                record.metrics.test_loss_clip_total[epoch] += loss_clip.item() 
                 utils.check_loss(loss)
         
-                test_losses.append(loss.item())
+                test_losses_this_epoch.append(loss.item())
         
                 # forward and backward top 1 accuracy        
                 labels = torch.arange(len(clip_target_norm)).to(clip_voxels_norm.device) 
                 record.metrics.test_fwd_percent_correct[epoch] += utils.topk(utils.batchwise_cosine_similarity(clip_voxels_norm, clip_target_norm), labels, k=1)
                 record.metrics.test_bwd_percent_correct[epoch] += utils.topk(utils.batchwise_cosine_similarity(clip_target_norm, clip_voxels_norm), labels, k=1)
+ 
 
-                # halving the batch size because the decoder is computationally heavy
-                blurry_recon_images = autoenc.decode(blurry_image_enc_[:len(voxel)//2]).sample.clamp(0,1)
-                blurry_recon_images = torch.vstack((blurry_recon_images, autoenc.decode(blurry_image_enc_[len(voxel)//2:]).sample.clamp(0,1)))
-                record.metrics.test_blurry_pixcorr_total[epoch] += pixcorr(image, blurry_recon_images)
+    return record, test_i, test_losses_this_epoch, test_image, test_voxel
 
-    return record, test_i, test_losses, test_image, test_voxel
-
-def compute_metrics(record, epoch, args, local_rank, train_i, test_i, losses, test_losses, lrs):
+def compute_metrics(record, epoch, args, local_rank, train_i, test_i, losses, test_losses_this_epoch, lrs):
     if local_rank==0:      
         if utils.is_interactive():
             # clear_output(wait=True)
@@ -683,23 +742,35 @@ def compute_metrics(record, epoch, args, local_rank, train_i, test_i, losses, te
 
         assert (test_i+1) == 1
         record.metrics.train_losses_raw = losses
-        record.metrics.test_losses_raw = test_losses
         record.metrics.train_i = train_i
         record.metrics.test_i = test_i
         record.metrics.train_losses[epoch] = np.mean(losses[-(train_i+1):])
-        record.metrics.test_losses[epoch] = np.mean(test_losses[-(test_i+1):])
+        record.metrics.test_losses[epoch] = np.mean(test_losses_this_epoch)
         record.metrics.lrs[epoch] = lrs[-1]
-        record.metrics.train_num_steps = len(losses)
-        record.metrics.test_num_steps = len(test_losses)
+        # record.metrics.train_num_steps = len(losses)
+        # record.metrics.test_num_steps = len(test_losses)
         record.metrics.train_fwd_pct_correct[epoch] = record.metrics.fwd_percent_correct[epoch].item() / (train_i + 1)
         record.metrics.train_bwd_pct_correct[epoch] = record.metrics.bwd_percent_correct[epoch].item() / (train_i + 1)
         record.metrics.avg_test_fwd_pct_correct[epoch] = record.metrics.test_fwd_percent_correct[epoch].item() / (test_i + 1)
         record.metrics.avg_test_bwd_pct_correct[epoch] = record.metrics.test_bwd_percent_correct[epoch].item() / (test_i + 1)
-        
+        record.args = args # save args to record
         # Save model checkpoint and reconstruct
         utils.save_file_pickle (f'{args.outdir}/{args.exp_name}.pkl', record)
-                
-        # if wandb_log: wandb.log(logs) 
+        print (
+            f"epoch {epoch} / {args.num_epochs} | ", 
+            f"train loss {record.metrics.train_losses[epoch]:.4f} | ",
+            f"test loss {record.metrics.test_losses[epoch]:.4f} | ",
+            f"train fwd {record.metrics.train_fwd_pct_correct[epoch]:.4f} | ",
+            f"train bwd {record.metrics.train_bwd_pct_correct[epoch]:.4f} | ",
+            f"test fwd {record.metrics.avg_test_fwd_pct_correct[epoch]:.4f} | ",
+            f"test bwd {record.metrics.avg_test_bwd_pct_correct[epoch]:.4f} | ",
+            flush = True
+        )
+
+    # wait for other GPUs to catch up if needed
+    accelerator.wait_for_everyone()
+    torch.cuda.empty_cache()
+    gc.collect()
 
     return record
 
@@ -708,24 +779,27 @@ if __name__ == "__main__":
     local_rank = get_local_rank()
 
     num_devices = setup_gpu_configs()
-    accelerator = get_deepspeed_accelerator(num_devices)
-    device, num_workers, world_size, distributed, print = get_training_params(accelerator, num_devices)
+    
+    
     optionally_specify_jupyter_args()
     args = get_parser_args(num_devices)
+    accelerator = get_deepspeed_accelerator(args, num_devices)
+    device, num_workers, world_size, distributed, print, data_type = get_training_params(accelerator)  
 
     img_augment = get_img_augmentations(args)
-    train_dl, test_dl, voxels, images = get_data_loaders(args)
-    clip_model , model, autoenc, optimizer, lr_scheduler, mse, pixcorr = get_models_and_optimizers(args, local_rank, num_devices)
+    train_dl, test_dl, voxels, images = get_data_loaders(args, data_type)
+    clip_model , model, optimizer, lr_scheduler, mse, l1, pixcorr = get_models_and_optimizers(args, local_rank, num_devices)
 
+    torch.cuda.empty_cache()
     model, optimizer, train_dl, test_dl, lr_scheduler = accelerator.prepare(
         model, optimizer, train_dl, test_dl, lr_scheduler
     )
 
     record = get_record(args)
-    record, train_i, losses, lrs = train(args, local_rank, 
-            clip_model , model, autoenc, optimizer, lr_scheduler, 
-            mse, pixcorr,
+    record, train_i, losses, lrs = train(args, data_type, local_rank, 
+            clip_model , model, optimizer, lr_scheduler, 
+            mse, l1, pixcorr,
             train_dl, test_dl, voxels, images, img_augment, record)
     
-    record.args = args # save args to record
+    
     print ("Finished successfully !") 
