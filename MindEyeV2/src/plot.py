@@ -133,3 +133,26 @@ def plot_learning_curve(results_folder, exp_name,
             ylabel = "avg_test_bwd_pct_correct", 
             xlabel = "num_sessions")
     
+def plot_pretraining(results_folder, exp_name, 
+                    num_runs_analyze,
+                    palette = None
+                   ):
+    fs = glob.glob(f"{results_folder}/{exp_name}.pkl")
+    train_losses = defaultdict(list)
+    test_losses = defaultdict(list)
+    avg_test_fwd_pct_correct = defaultdict(list)
+    avg_test_bwd_pct_correct = defaultdict(list)
+   
+    for f in np.random.choice(fs, min(num_runs_analyze, len(fs)), replace=False) :
+        
+        with open(f, 'rb') as handle:
+            try:
+                record = CPU_Unpickler(handle).load()
+                
+            except Exception as e: 
+                print(e)
+                print("problem !")
+                continue
+            # sort by key, return a list of tuples 
+            model = record.model_state_dict 
+            print (model.keys())

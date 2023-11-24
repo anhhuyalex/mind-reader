@@ -130,6 +130,10 @@ def get_parser_args(num_devices):
         help="Path to where NSD data is stored / where to download it to",
     )
     parser.add_argument(
+        "--subj_sample_list", type=str, default="cache/subj1_sample_list.txt",
+        help="Path to where the list of samples for the subject is stored, to be used for data-pruning",
+    )
+    parser.add_argument(
         "--subj",type=int, default=1, choices=[1,2,5,7],
     )
     parser.add_argument(
@@ -196,7 +200,7 @@ def get_parser_args(num_devices):
         help="save backup ckpt and reconstruct every x epochs",
     )
     parser.add_argument(
-        "--seed",type=int,default=42,
+        "--seed",type=int,default=0,
     )
     parser.add_argument(
         "--max_lr",type=float,default=3e-4,
@@ -212,8 +216,8 @@ def get_parser_args(num_devices):
         action='store_true', 
         help = "debug mode", 
         default=False)
-    parser.add_argument("--num_sessions", type=int, 
-        default=1,
+    parser.add_argument("--num_samples_to_prune", type=int, 
+        default=0,
         action = "store",
         help="number of sessions to train on")
 
@@ -238,22 +242,25 @@ def get_parser_args(num_devices):
     args.test_batch_size = args.num_test # test batch size is the same as the number of test samples
 
     # get data paths
-    sesses = np.random.choice(np.arange(37), size=args.num_sessions, replace=False)
-    sess_str = ",".join([str(s) for s in sesses]) 
-    print ("sess_str", sess_str)
+    args.train_url = f"{args.data_path}/wds/subj0{args.subj}/train/" + "{0..36}.tar"
+    args.test_url = f"{args.data_path}/wds/subj0{args.subj}/test/" + "0.tar"
 
-    if args.num_sessions > 1:
-        args.train_url = f"{args.data_path}/wds/subj0{args.subj}/train/" + "{{{s}}}.tar".format(s=sess_str)
-        args.test_url = f"{args.data_path}/wds/subj0{args.subj}/test/" + "0.tar"
-    else: 
-        args.train_url = f"{args.data_path}/wds/subj0{args.subj}/train/" + f"{sess_str}.tar"
-        args.test_url = f"{args.data_path}/wds/subj0{args.subj}/test/" + "0.tar"
+    # sesses = np.random.choice(np.arange(37), size=args.num_sessions, replace=False)
+    # sess_str = ",".join([str(s) for s in sesses]) 
+    # print ("sess_str", sess_str)
+
+    # if args.num_sessions > 1:
+    #     args.train_url = f"{args.data_path}/wds/subj0{args.subj}/train/" + "{{{s}}}.tar".format(s=sess_str)
+    #     args.test_url = f"{args.data_path}/wds/subj0{args.subj}/test/" + "0.tar"
+    # else: 
+    #     args.train_url = f"{args.data_path}/wds/subj0{args.subj}/train/" + f"{sess_str}.tar"
+    #     args.test_url = f"{args.data_path}/wds/subj0{args.subj}/test/" + "0.tar"
 
     
 
-    if args.file_prefix=="sessions_1_2" :
-        args.train_url = f"{args.data_path}/wds/subj0{args.subj}/train/" + "{0..1}.tar"
-        args.test_url = f"{args.data_path}/wds/subj0{args.subj}/test/" + "0.tar"
+    # if args.file_prefix=="sessions_1_2" :
+    #     args.train_url = f"{args.data_path}/wds/subj0{args.subj}/train/" + "{0..1}.tar"
+    #     args.test_url = f"{args.data_path}/wds/subj0{args.subj}/test/" + "0.tar"
 
     # get model params
     args.clip_seq_dim = 257
@@ -263,6 +270,8 @@ def get_parser_args(num_devices):
     # save params
     args.exp_name = f"{args.file_prefix}_{time.time()}"
 
+    # seed
+    args.seed = args.seed if args.seed else int(time.time())
     return args
 
 def get_img_augmentations(args):
@@ -322,19 +331,36 @@ class H5Dataset(torch.utils.data.Dataset):
 
 def get_data_loaders(args, data_type):
     def my_split_by_node(urls): return urls
+
+    # read from args.subj_sample_list to get list of samples to use for training
+    with open(args.subj_sample_list, 'r') as f:
+        args.subj_sample_list = f.read().splitlines()
+        samples_to_prune = np.random.choice(args.subj_sample_list, size=args.num_samples_to_prune, replace=False)
+        args.subj_sample_list = [s for s in args.subj_sample_list if s not in samples_to_prune]
+        print ("samples_to_prune", samples_to_prune[:100])
+        # args.subj_sample_list = np.random.choice(f.read().splitlines(), size=args.num_samples, replace=False)
+    # write args.subj_sample_list to keylist.txt
+    #with open('cache/subj1_sample_list_len_6761_seed_42.txt', 'w') as f:
+    #    f.write("\n".join(args.subj_sample_list))
+    print (np.logspace(0, np.log10(6761), 37).astype(int))
+   
+    def filtered_samples(sample):
+        return sample["__key__"] in args.subj_sample_list
     train_data = wds.WebDataset(args.train_url,resampled=False,nodesplitter=my_split_by_node)\
+                    .select(filtered_samples) \
                     .shuffle(750, initial=1500, rng=random.Random(42))\
                     .decode("torch")\
                     .rename(behav="behav.npy", past_behav="past_behav.npy", future_behav="future_behav.npy", olds_behav="olds_behav.npy")\
                     .to_tuple(*["behav", "past_behav", "future_behav", "olds_behav"])
     train_dl = torch.utils.data.DataLoader(train_data, batch_size=args.batch_size, shuffle=False, drop_last=False, pin_memory=True)
-
+    
     # compute how many training samples 
     num_train = 0
     for train_i, (behav, past_behav, future_behav, old_behav) in enumerate(train_dl):
         num_train += len(behav)
     args.num_train = num_train
-    
+    print ("num_train", num_train)
+
 
     test_data = wds.WebDataset(args.test_url,resampled=False,nodesplitter=my_split_by_node)\
                         .shuffle(750, initial=1500, rng=random.Random(42))\
@@ -783,6 +809,7 @@ if __name__ == "__main__":
     
     optionally_specify_jupyter_args()
     args = get_parser_args(num_devices)
+    utils.seed_everything(seed=args.seed, cudnn_deterministic=True)
     accelerator = get_deepspeed_accelerator(args, num_devices)
     device, num_workers, world_size, distributed, print, data_type = get_training_params(accelerator)  
 
