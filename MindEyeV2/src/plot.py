@@ -6,14 +6,8 @@ import io
 from collections import defaultdict 
 import seaborn as sns
 import matplotlib.pyplot as plt
-
-class CPU_Unpickler(pickle.Unpickler):
-    def find_class(self, module, name):
-        if module == 'torch.storage' and name == '_load_from_bytes':
-            return lambda b: torch.load(io.BytesIO(b), map_location='cpu')
-        else:
-            return super().find_class(module, name)
-
+import utils
+import copy
 def plot(results_folder, exp_name, 
                     num_runs_analyze,
                     
@@ -39,7 +33,7 @@ def plot(results_folder, exp_name,
         
         with open(f, 'rb') as handle:
             try:
-                record = CPU_Unpickler(handle).load()
+                record = utils.CPU_Unpickler(handle).load()
                 
             except Exception as e: 
                 print(e)
@@ -94,26 +88,29 @@ def plot_learning_curve(results_folder, exp_name,
         
         with open(f, 'rb') as handle:
             try:
-                record = CPU_Unpickler(handle).load()
+                record = utils.CPU_Unpickler(handle).load()
                 
             except Exception as e: 
                 print(e)
                 print("problem !")
                 continue
+            
             # sort by key, return a list of tuples 
-            t = sorted(record.metrics.train_losses.items() , key=lambda x: x[0])
+            t = sorted(copy.deepcopy(record.metrics.train_losses).items() , key=lambda x: x[0])
             train_losses["train_losses"].append ( t[-1][1])
             train_losses["num_sessions"].append ( record.args.num_sessions) 
-            t = sorted(record.metrics.test_losses.items() , key=lambda x: x[0])
+            t = sorted(copy.deepcopy(record.metrics.test_losses).items() , key=lambda x: x[0])
             test_losses["test_losses"].append ( t[-1][1])
             test_losses["num_sessions"].append ( record.args.num_sessions)
-            t = sorted(record.metrics.avg_test_fwd_pct_correct.items() , key=lambda x: x[0])
+            t = sorted(copy.deepcopy(record.metrics.avg_test_fwd_pct_correct).items() , key=lambda x: x[0])
             avg_test_fwd_pct_correct["avg_test_fwd_pct_correct"].append ( t[-1][1])
             avg_test_fwd_pct_correct["num_sessions"].append ( record.args.num_sessions)
-            t = sorted(record.metrics.avg_test_bwd_pct_correct.items() , key=lambda x: x[0])
+            t = sorted(copy.deepcopy(record.metrics.avg_test_bwd_pct_correct).items() , key=lambda x: x[0])
             avg_test_bwd_pct_correct["avg_test_bwd_pct_correct"].append ( t[-1][1])
             avg_test_bwd_pct_correct["num_sessions"].append ( record.args.num_sessions)
-    print (record.metrics.keys())
+             
+            record = []
+            
             
     # plot curve of train losses 
     plot_curve( y = "train_losses", data = train_losses, 
@@ -147,7 +144,7 @@ def plot_pretraining(results_folder, exp_name,
         
         with open(f, 'rb') as handle:
             try:
-                record = CPU_Unpickler(handle).load()
+                record = utils.CPU_Unpickler(handle).load()
                 
             except Exception as e: 
                 print(e)
