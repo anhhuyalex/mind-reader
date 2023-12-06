@@ -380,8 +380,11 @@ clip_preproc = transforms.Compose([
 def get_clip_embeddings(clip_model,image):
     preproc_image = clip_preproc(image)
     embeds = clip_model(preproc_image).last_hidden_state # (bs x 257 x 1024)
+    # assert not torch.any(torch.isnan(embeds)), f"clip_model(preproc_image).last_hidden_state contain NaNs {image}"
     embeds = clip_model.vision_model.post_layernorm(embeds)
+    # assert not torch.any(torch.isnan(embeds)), "clip_model.vision_model.post_layernorm(embeds) contain NaNs"
     embeds = clip_model.visual_projection(embeds) # (bs x 257 x 768)
+    # assert not torch.any(torch.isnan(embeds)), "clip_model.visual_projection(embeds) contain NaNs"
     return embeds
 
 @torch.no_grad()

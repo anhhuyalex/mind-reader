@@ -1,10 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=hipp_test
+#SBATCH --account=proj_fmri
 #SBATCH --mem-per-cpu=40G
 #SBATCH --time=12:00:00
-#SBATCH --output _mindreader-%J.log
-#SBATCH --partition=della-gpu 
-#SBATCH --cpus-per-task=4
+#SBATCH --output=_mindreader-%J.log
+#SBATCH --partition=gpu 
+#SBATCH --cpus-per-gpu=6
 #SBATCH --gres=gpu:1
 
 
@@ -28,7 +29,7 @@ source activate neu502b
 # python -u main.py --data_path=/scratch/gpfs/KNORMAN/mindeyev2 --model_name=test --subj=1 --batch_size=128 --max_lr=3e-4 --mixup_pct=.66 --num_epochs=12 --ckpt_interval=999 --clip_scale=1. --blur_scale=100. --depth_scale=100.  --file_prefix=activelrnOCT23 --num_sessions=$1
 # python -u data_pruning.py --data_path=/scratch/gpfs/KNORMAN/mindeyev2 --subj_sample_list=cache/subj1_sample_list_len_6761_seed_42.txt --model_name=test --subj=1 --batch_size=128 --max_lr=3e-4 --mixup_pct=.66 --num_epochs=12 --ckpt_interval=999 --clip_scale=1. --blur_scale=100. --depth_scale=100.  --file_prefix=pruningNOV6  --num_samples=6761
 # python -u pretrain.py --data_path=/scratch/gpfs/KNORMAN/mindeyev2 --model_name=stage1_noprior_subj01x --model_name=test --subj=1 --num_sessions=-1 --max_lr=3e-5 --mixup_pct=.33 --num_epochs=40 --use_image_aug --file_prefix=pretrainNOV16  
-python -u finetune.py --data_path=/scratch/gpfs/KNORMAN/mindeyev2 --model_name=stage2_noprior_subj01x --stage2  --subj=1 --subj_list=1 --num_sessions=$1 --max_lr=3e-5 --mixup_pct=.33 --num_epochs=40 --use_image_aug --file_prefix=finetune_subj1_perf_vs_numsession_NOV24 --resume_from_ckpt=pretrainNOV16_1700670984.4315398.pkl
+python -u finetune.py --data_path=/fsx/proj-fmri/shared/mindeyev2_dataset --model_name=stage2_noprior_subj01x --stage2  --subj=1 --subj_list=1 --num_sessions=$1 --max_lr=3e-5 --mixup_pct=.33 --num_epochs=40 --use_image_aug --file_prefix=finetune_subj1_perf_vs_numsession_NOV24 --resume_from_ckpt=pretrainNOV16_1700670984.4315398.pkl
 
 # loop sbatch --array=0-37 hipp.sh $i 
 

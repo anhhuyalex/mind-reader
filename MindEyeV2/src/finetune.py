@@ -67,6 +67,10 @@ def get_parser_args():
         help="Number of training samples to include (mutually exclusive with num_sessions)",
     )
     parser.add_argument(
+        "--filter_samples", type=str, default=None,
+        help="Path to file containing list of samples to keep",
+    )
+    parser.add_argument(
         "--batch_size", type=int, default=28,
         help="Batch size can be increased by 10x if only training v2c and not diffusion prior",
     )
@@ -131,7 +135,10 @@ def get_parser_args():
     parser.add_argument(
         "--max_lr",type=float,default=3e-4,
     )
-    
+    parser.add_argument(
+        "--save_dir",type=str,default="./train_logs",
+    )
+
     parser.add_argument("--file_prefix", type=str, default="",
         action = "store",
         help="prefix for ckpt files")
@@ -156,10 +163,11 @@ def get_parser_args():
     assert args.num_sessions == -1 or args.num_samples == -1, "cannot specify both num_sessions and num_samples" 
 
     args.num_devices = torch.cuda.device_count()
-   
-
+    for i in range(args.num_devices):
+        print("device", torch.cuda.get_device_properties(i).name)
+    
     # get output directory
-    args.outdir = os.path.abspath(f'./train_logs')
+    args.outdir = os.path.abspath(args.save_dir)
     if not os.path.exists(args.outdir):
         os.makedirs(args.outdir,exist_ok=True)
 
@@ -173,6 +181,7 @@ def get_parser_args():
 
     # seed
     args.seed = args.seed if args.seed else int(time.time())
+    utils.seed_everything(seed=args.seed, cudnn_deterministic=True)
 
     # save source code 
     args.source_code = inspect.getsource(inspect.getmodule(inspect.currentframe()))
@@ -189,7 +198,6 @@ def get_training_params(accelerator, args):
     device = accelerator.device
     world_size = accelerator.state.num_processes
     distributed = not accelerator.state.distributed_type == 'NO'
-    print("device:",device)
     
     
     if args.num_devices==0 or not distributed: 
@@ -211,7 +219,7 @@ def get_training_params(accelerator, args):
  
     return device, num_workers, world_size, distributed, print, data_type
  
-def get_img_augmentations(args):
+def get_img_augmentations(args, print):
     img_augment = None 
     if args.use_image_aug:
         print ("\033[91m" + "WARNING: Using image augmentation" + "\033[0m")
@@ -231,12 +239,12 @@ def get_img_augmentations(args):
         print ("\033[91m" + "WARNING: not using image augmentation" + "\033[0m")
     return img_augment 
  
-def get_data_loaders(args):
+def get_data_loaders(args, print):
     def my_split_by_node(urls): return urls
     num_voxels_list = []
     nsessions_allsubj=np.array([40, 40, 32, 30, 40, 32, 40, 30])
     num_samples_per_epoch = 30000 // args.num_devices 
-
+    if args.debug: num_samples_per_epoch = 28*4
     print("dividing batch size by subj_list, which will then be concatenated across subj during training...") 
 
     args.batch_size = args.batch_size // len(args.subj_list)
@@ -261,11 +269,40 @@ def get_data_loaders(args):
             print(f"subj0{args.subj_list[si]} training with {args.num_sessions} sessions")
             train_url = f"{args.data_path}/wds/subj0{s}/train/" + "{0.." + f"{args.num_sessions-1}" + "}.tar"
         print(train_url)
+        if args.filter_samples is not None:
+            with open(args.filter_samples) as f:
+                samples_list = f.read().splitlines()
+
+            # filter samples if num_samples is specified
+            if args.num_samples != -1:
+                samples_list = [samples_list[i] for i in torch.randperm(len(samples_list))[:args.num_samples]]
+                print(f"subj0{s} training with {args.num_samples} samples {samples_list[:100]} {len(samples_list) }...")
+            def filter_samples_func(sample):
+                
+                if sample["__key__"] not in samples_list:
+                    return None
+                return sample
+        else:
+            def filter_samples_func(sample):
+                return sample
         train_data[f'subj0{s}'] = wds.WebDataset(train_url,resampled=True,nodesplitter=my_split_by_node)\
-                        .shuffle(750, initial=1500, rng=random.Random(42))\
-                        .decode("torch")\
+                        .shuffle(750, initial=1500, rng=random.Random(args.seed))\
+                        .decode("torch").map(filter_samples_func)\
                         .rename(behav="behav.npy", past_behav="past_behav.npy", future_behav="future_behav.npy", olds_behav="olds_behav.npy")\
                         .to_tuple(*["behav", "past_behav", "future_behav", "olds_behav"])
+        # samples = set()
+        # subj01 training with 200 samples ['sample000000451', 'sample000001180', 'sample000000146', 'sample000000530', 'sample000000219', 'sample000000962', 'sample000001148', 'sample000000935', 'sample000000227', 'sample000001185', 'sample000001091', 'sample000000224', 'sample000000445', 'sample000001239', 'sample000000125', 'sample000000422', 'sample000001323', 'sample000000432', 'sample000000247', 'sample000001174', 'sample000000578', 'sample000001247', 'sample000000290', 'sample000000053', 'sample000000898', 'sample000000060', 'sample000000466', 'sample000000242', 'sample000000784', 'sample000000274', 'sample000000435', 'sample000001275', 'sample000000100', 'sample000000296', 'sample000000615', 'sample000000839', 'sample000000321', 'sample000001190', 'sample000000681', 'sample000000009', 'sample000000819', 'sample000000366', 'sample000001076', 'sample000000398', 'sample000001105', 'sample000001070', 'sample000000091', 'sample000000940', 'sample000000748', 'sample000000678', 'sample000000004', 'sample000000439', 'sample000000736', 'sample000001042', 'sample000001039', 'sample000000977', 'sample000000599', 'sample000001018', 'sample000000000', 'sample000000695', 'sample000000177', 'sample000000442', 'sample000001112', 'sample000000634', 'sample000000249', 'sample000000731', 'sample000000597', 'sample000001268', 'sample000000241', 'sample000000960', 'sample000000827', 'sample000001064', 'sample000000815', 'sample000001222', 'sample000000780', 'sample000001245', 'sample000000538', 'sample000000026', 'sample000000798', 'sample000000419', 'sample000000633', 'sample000000098', 'sample000000501', 'sample000000906', 'sample000001126', 'sample000001131', 'sample000000763', 'sample000000212', 'sample000000322', 'sample000000754', 'sample000000047', 'sample000000262', 'sample000001133', 'sample000000608', 'sample000000564', 'sample000000258', 'sample000001007', 'sample000000254', 'sample000000652', 'sample000001293'] 200...
+        # for s, train_dl in enumerate(train_data["subj01"]): 
+       
+        # if train_dl[0] not in samples_list: 
+        # print ("in samples_list")
+        # w
+        # # save samples to file
+        # with open(f'./cache/subj0{s}_samples_6761.txt', 'w') as f:
+        #     for item in samples:
+        #         f.write("%s\n" % item)
+        # print ("len(samples)", len(samples), samples)
+       
         train_dl[f'subj0{s}'] = torch.utils.data.DataLoader(train_data[f'subj0{s}'], batch_size=args.batch_size, shuffle=False, drop_last=True, pin_memory=True)
         # Load hdf5 data for betas, but don't put everything into memory
         f = h5py.File(f'{args.data_path}/betas_all_subj0{s}_fp32.hdf5', 'r')
@@ -382,14 +419,15 @@ def load_ckpt(outdir, tag, model,
         state_dict = checkpoint['model_state_dict']
     
     model.load_state_dict(state_dict, strict=strict)
-    print ("loaded checkpoint['model_state_dict']", checkpoint['model_state_dict']['backbone.clip_proj.8.bias'])
+    
     del checkpoint 
     return model 
 
-def get_models_and_optimizers(args, local_rank, device):
-    vd_pipe = VersatileDiffusionPipeline.from_pretrained("./versatile-diffusion", torch_dtype=args.data_type, cache_dir=args.cache_dir)
-    vd_pipe.scheduler = UniPCMultistepScheduler.from_pretrained("./versatile-diffusion", subfolder="scheduler", cache_dir=args.cache_dir)
-
+def get_models_and_optimizers(args, local_rank, device, print):
+    vd_pipe = VersatileDiffusionPipeline.from_pretrained("shi-labs/versatile-diffusion", torch_dtype=args.data_type, cache_dir=args.cache_dir)
+    vd_pipe.scheduler = UniPCMultistepScheduler.from_pretrained("shi-labs/versatile-diffusion", subfolder="scheduler", cache_dir=args.cache_dir)
+    # vd_pipe.to(torch.device(f"cuda:{local_rank}"))
+    
     clip_model = vd_pipe.image_encoder
     clip_model.to(args.data_type)
     clip_model.eval()
@@ -422,7 +460,7 @@ def get_models_and_optimizers(args, local_rank, device):
         model = load_ckpt(args.outdir, args.resume_from_ckpt, model,
             strict=False, stage2=args.stage2).to(device)
 
-    print ("loaded model['model_state_dict']", model.state_dict()['backbone.clip_proj.8.bias'])
+    
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
     opt_grouped_parameters = [
         {'params': [p for n, p in model.ridge.named_parameters()], 'weight_decay': 1e-2},
@@ -457,7 +495,7 @@ def get_models_and_optimizers(args, local_rank, device):
  
     return clip_model, model, optimizer, lr_scheduler 
 
-def get_record(args):
+def get_record(args, print):
     record = utils.dotdict(
         args = args,
         metrics = utils.dotdict(
@@ -485,7 +523,7 @@ def get_record(args):
 
 def train(args, local_rank, clip_model , model,
         optimizer, lr_scheduler,  
-        train_dls, test_dl, voxels, images, img_augment, record, device):
+        train_dls, test_dl, voxels, images, img_augment, record, device, print):
     epoch = 0
     losses, test_losses, lrs = [], [], []
     best_test_loss = 1e9
@@ -493,7 +531,6 @@ def train(args, local_rank, clip_model , model,
 
     test_image, test_voxel = None, None
     soft_loss_temps = utils.cosine_anneal(0.004, 0.0075, args.num_epochs - int(args.mixup_pct * args.num_epochs))
-    utils.seed_everything(seed=args.seed, cudnn_deterministic=True)
     
     print(f"{args.model_name} starting with epoch {epoch} / {args.num_epochs}")
      
@@ -508,6 +545,7 @@ def train(args, local_rank, clip_model , model,
         for s, train_dl in enumerate(train_dls):
             with torch.cuda.amp.autocast(dtype=args.data_type):
                 for iter, (behav0, past_behav0, future_behav0, old_behav0) in enumerate(train_dl):
+                    print ("constructing voxel_iters and image_iters...", iter, "behav0", behav0[:,0,0], behav0[:,0,0], behav0.shape)
                     image0 = images[behav0[:,0,0].cpu().long()].float()
                     image_iters[iter,s*args.batch_size:s*args.batch_size+args.batch_size] = image0
                     voxel0 = voxels[f'subj0{args.subj_list[s]}'][behav0[:,0,5].cpu().long()]
@@ -522,8 +560,9 @@ def train(args, local_rank, clip_model , model,
 
                     if iter >= args.num_iterations_per_epoch-1:
                         break
-
+        
         # you now have voxel_iters and image_iters with num_iterations_per_epoch batches each
+        #print ("num_iterations_per_epoch", args.num_iterations_per_epoch)
         for train_i in range(args.num_iterations_per_epoch):
             with torch.cuda.amp.autocast(dtype=args.data_type):
                 optimizer.zero_grad()
@@ -534,6 +573,9 @@ def train(args, local_rank, clip_model , model,
                     image = img_augment(image)
 
                 clip_target = utils.get_clip_embeddings(clip_model,image)
+                #print ("image", image.shape)
+                #print ("clip_target", clip_target, clip_target.shape)
+                assert not torch.any(torch.isnan(image))
                 assert not torch.any(torch.isnan(clip_target))
 
                 if epoch < int(args.mixup_pct * args.num_epochs):
@@ -566,6 +608,7 @@ def train(args, local_rank, clip_model , model,
                         temp=epoch_temp)
 
                 loss = loss_clip
+                #print ("loss_clip", loss.item())
                 labels = torch.arange(len(clip_target_norm)).to(clip_voxels_norm.device) 
                 record.metrics.fwd_percent_correct[epoch] += utils.topk(utils.batchwise_cosine_similarity(clip_voxels_norm, clip_target_norm), labels, k=1) 
                 record.metrics.bwd_percent_correct[epoch] += utils.topk(utils.batchwise_cosine_similarity(clip_target_norm, clip_voxels_norm), labels, k=1) 
@@ -573,7 +616,7 @@ def train(args, local_rank, clip_model , model,
                 utils.check_loss(loss)
                 accelerator.backward(loss)
                 optimizer.step()
-
+                print ("clip_model", clip_model.state_dict())
                 losses.append(loss.item())
                 lrs.append(optimizer.param_groups[0]['lr'])
         
@@ -587,17 +630,17 @@ def train(args, local_rank, clip_model , model,
         record, test_i, test_losses_this_epoch, test_image, test_voxel = compute_validation_metrics (epoch, args, local_rank,
                 test_image, test_voxel,
                 clip_model , model, optimizer, lr_scheduler, 
-                test_dl, voxels, images, img_augment, record)
+                test_dl, voxels, images, img_augment, record, print)
 
         record = compute_metrics (record, epoch, args, local_rank, 
                     train_i, test_i, losses, test_losses_this_epoch, lrs,
-                    model, optimizer, lr_scheduler)
+                    model, optimizer, lr_scheduler, print)
     return record, train_i, losses, lrs
 
 def compute_validation_metrics(epoch, args, local_rank,
                 test_image, test_voxel,
                 clip_model, model, optimizer, lr_scheduler, 
-                test_dl, voxels, images, img_augment, record):
+                test_dl, voxels, images, img_augment, record, print):
     test_losses_this_epoch = []
     model.eval()
     if local_rank==0:
@@ -637,7 +680,7 @@ def compute_validation_metrics(epoch, args, local_rank,
                     temp=.006)
 
                 loss = loss_clip
-  
+                print ("val loss_clip", loss.item())
                 record.metrics.test_loss_clip_total[epoch] += loss_clip.item() 
                 utils.check_loss(loss)
         
@@ -653,7 +696,7 @@ def compute_validation_metrics(epoch, args, local_rank,
 
 def compute_metrics(record, epoch, args, local_rank, 
                     train_i, test_i, losses, test_losses_this_epoch, lrs,
-                    model, optimizer, lr_scheduler
+                    model, optimizer, lr_scheduler, print
 ):
     if local_rank==0:      
         assert (test_i+1) == 1
@@ -703,21 +746,18 @@ if __name__ == "__main__":
     device, num_workers, world_size, distributed, print, args.data_type = get_training_params(accelerator, args)  
     
 
-    img_augment = get_img_augmentations(args)
-    train_dls, test_dl, voxels, images = get_data_loaders(args)
-    clip_model , model, optimizer, lr_scheduler = get_models_and_optimizers(args, local_rank, device)
+    img_augment = get_img_augmentations(args, print)
+    train_dls, test_dl, voxels, images = get_data_loaders(args, print)
+    clip_model , model, optimizer, lr_scheduler = get_models_and_optimizers(args, local_rank, device, print)
 
     torch.cuda.empty_cache()
-    model, optimizer, train_dls, test_dl, lr_scheduler = accelerator.prepare(
-        model, optimizer, train_dls, test_dl, lr_scheduler
-    )
     model, optimizer, *train_dls, lr_scheduler = accelerator.prepare(model, optimizer, *train_dls, lr_scheduler)
 
 
-    record = get_record(args)
+    record = get_record(args, print)
     record, train_i, losses, lrs = train(args, local_rank, clip_model, model,
         optimizer, lr_scheduler,  
-        train_dls, test_dl, voxels, images, img_augment, record, device)
+        train_dls, test_dl, voxels, images, img_augment, record, device, print)
      
     
     print ("Finished successfully with args", args) 

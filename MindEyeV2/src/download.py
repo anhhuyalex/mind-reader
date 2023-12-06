@@ -9,7 +9,7 @@ print (diffusers.__version__)
 # vd_pipe.scheduler = UniPCMultistepScheduler.from_pretrained("shi-labs/versatile-diffusion", subfolder="scheduler", cache_dir="./cache")
 
 snapshot_download(repo_id="shi-labs/versatile-diffusion", repo_type = "model", revision="main", cache_dir = "./cache" ,
-    local_dir= "/scratch/gpfs/KNORMAN/versatile-diffusion", local_dir_use_symlinks = False, resume_download = True)
+    local_dir= "/fsx/proj-fmri/alexnguyen/mind-reader/MindEyeV2/src/versatile-diffusion", local_dir_use_symlinks = False, resume_download = True)
 
 # # from models import Clipper
 # import torch
