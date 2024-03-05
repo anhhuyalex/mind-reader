@@ -672,6 +672,11 @@ def save_file_pickle(fname, file):
     with open(fname, "wb") as f:
         pickle.dump(file, f)
 
+def load_file_pickle(fname):
+    with open(fname, "rb") as f:
+        file = pickle.load(f)
+    return file
+
 class CPU_Unpickler(pickle.Unpickler):
     def find_class(self, module, name):
         if module == 'torch.storage' and name == '_load_from_bytes':

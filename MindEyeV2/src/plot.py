@@ -153,3 +153,26 @@ def plot_pretraining(results_folder, exp_name,
             # sort by key, return a list of tuples 
             model = record.model_state_dict 
             print (model.keys())
+
+
+import wandb
+import seaborn as sns
+api = wandb.Api()
+ENTITY = "anhhuyalex"
+PROJECT = "eye_int"
+# Filter runs by group name
+runs = api.runs(f"{ENTITY}/{PROJECT}")#, filters={"group": "finetune_numsessions"})
+
+# Download specific data from each run
+num_sessions = []
+test_bwd_pct_correct = []
+test_fwd_pct_correct = []
+for run in runs:
+    if run.state == "finished" and run.config.get("num_sessions", None) is not None:
+        num_sessions.append(   run.config["num_sessions"])
+        test_bwd_pct_correct.append( run.summary["test/test_bwd_pct_correct"])
+        test_fwd_pct_correct.append( run.summary["test/test_fwd_pct_correct"])
+sns.set_theme(style="whitegrid")
+ax = sns.lineplot( x=num_sessions, y=test_fwd_pct_correct, marker="o")
+ax.set_title("test_fwd_pct_correct")
+ax.set_xlabel("num_sessions")
