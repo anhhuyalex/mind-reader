@@ -387,6 +387,14 @@ def get_clip_embeddings(clip_model,image):
     # assert not torch.any(torch.isnan(embeds)), "clip_model.visual_projection(embeds) contain NaNs"
     return embeds
 
+def get_clip_outputs(clip_model,image, normalize_output=True):
+    preproc_image = clip_preproc(image)
+    outputs = clip_model(preproc_image).image_embeds # (bs x 768) 
+    # l2 normalize outputs 
+    if normalize_output:
+        outputs = nn.functional.normalize(outputs, p=2, dim=-1)
+    return outputs
+
 @torch.no_grad()
 def reconstruction(
     image, voxel,
